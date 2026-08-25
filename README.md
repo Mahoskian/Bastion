@@ -110,6 +110,15 @@ mc snapshot pause/resume  hold the scheduled runs during maintenance
 mc gc                     size the heap from the GC logs
 mc metrics sample|show    time series of load and GC behaviour
 mc logs tail|digest       digest shows only problems it hasn't reported before
+mc why-slow               why a given hour was bad, from four logs at once
+mc chunks                 chunk counts, size distribution, and bloated chunks
+```
+
+**For the players.**
+
+```
+mc wrapped [player]       leaderboards, or one player's card
+mc deaths                 plot deaths and find the spot that keeps killing
 ```
 
 **Mods and client packs.**
@@ -120,6 +129,18 @@ mc mods fetch|install     stage jars, then install them — archiving what they 
 mc mods manifest          regenerate the tracked mod lists (--check to detect drift)
 mc mrpack                 build a Modrinth .mrpack for players
 ```
+
+`mc why-slow` puts the overload warnings, the GC pauses, the join times and the
+pregenerator's own progress lines on one clock, then says which of them was big
+enough to explain the rest — and, when the GC log has rotated past the window,
+says that the heap can be neither blamed nor cleared rather than clearing it on
+evidence that no longer exists. `mc chunks` reads only the 8KiB header of each
+region file, so counting 832,604 chunks across 1,150 files takes under a
+second.
+
+`mc wrapped` and `mc deaths` read what the server already writes down: the
+per-player stats files, and — for death positions — the gravestone placements
+in the log, joined to the vanilla death message on the same second.
 
 `mc mods check` audits every installed jar against Modrinth in three bulk
 requests rather than one per mod. `mc mods manifest` writes a `README.md` into
@@ -199,6 +220,7 @@ Nothing it cannot rebuild, and nothing it does not announce:
 | `admin/.runtime.json` | the supervisor's live state; meaningless once the JVM exits |
 | `admin/.metrics.db` | the metrics time series — outlives the GC logs, which rotate |
 | `admin/.log-baseline.db` | fingerprints of log entries already reported |
+| nothing else | `wrapped`, `deaths`, `chunks` and `why-slow` only read |
 | `backups/` | the restic repository and the password that unlocks it |
 | `fetch-mods/` | staged jar downloads, and the jars `install` swapped out |
 | `logs/gc.log` | written by the JVM flags `mc start` sets |

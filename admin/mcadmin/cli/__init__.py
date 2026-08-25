@@ -8,7 +8,20 @@ from __future__ import annotations
 
 import typer
 
-from . import dev, gc, logs, metrics, mods, mrpack, server, snapshot
+from . import (
+    chunks,
+    deaths,
+    dev,
+    gc,
+    logs,
+    metrics,
+    mods,
+    mrpack,
+    server,
+    slow,
+    snapshot,
+    stats,
+)
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -20,7 +33,7 @@ app.add_typer(snapshot.app, name="snapshot")
 app.add_typer(logs.app, name="logs")
 app.add_typer(metrics.app, name="metrics")
 app.add_typer(mods.app, name="mods")
-for module in (server, gc, mrpack, dev):
+for module in (server, gc, mrpack, stats, deaths, chunks, slow, dev):
     app.registered_commands.extend(module.app.registered_commands)
 
 __all__ = ["app"]

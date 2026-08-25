@@ -40,7 +40,14 @@ and never letting a restore write somewhere the caller did not mean.
 fingerprints them against a SQLite baseline so a digest reports what is *new*
 rather than what is frequent. `gclog.py` parses G1 output and sizes the heap
 from the measured live set. `metrics.py` keeps the time series that outlives
-the logs, which rotate.
+the logs, which rotate. `slow.py` is the composite: it puts overload warnings,
+GC pauses, sessions and pregen progress on one clock and compares them, which
+is the only way to rule a cause *out*.
+
+**The world** — `stats.py` reads the per-player counters the server already
+keeps, `deaths.py` joins gravestone placements to death messages so a death has
+both a cause and a position, and `regions.py` reads region-file headers. All
+three are read-only, and none of them needs a running server.
 
 **Mods** — `modrinth.py` is a bulk client: every lookup batches, so auditing
 163 jars is three requests. `mods.py` turns those answers into a verdict per
@@ -80,6 +87,17 @@ The server directory is derived from this file's own location, with
 
 **Bytes are verified before they land.** Downloads are checked against sha512
 then sha1 before anything is written; a mismatch never reaches disk.
+
+**Missing evidence is not evidence.** Several reports draw on logs that rotate
+away. When the data for a window is simply gone, the report says so rather than
+reporting a zero: `why-slow` marks a window the GC log no longer covers as
+neither blaming nor clearing the heap, and `deaths` counts a death whose
+position was never logged instead of dropping it off the map.
+
+**Aggregates are accumulated, not collected.** A world holds more chunks than
+it is sensible to build objects for, so `regions.py` keeps a histogram and a
+running top-N and discards the rest as it reads — which is what makes scanning
+832,604 chunks a sub-second operation.
 
 ## Tests
 

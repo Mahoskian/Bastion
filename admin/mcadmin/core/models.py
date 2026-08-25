@@ -93,6 +93,62 @@ class Paths(BaseModel):
     def mods_dir(self) -> Path:
         return self.server_dir / "mods"
 
+    # -- the world, and the per-player files beside it
+
+    @property
+    def world_dir(self) -> Path:
+        return self.server_dir / "world"
+
+    @property
+    def usercache(self) -> Path:
+        """The server's own uuid -> name map. Everything else on disk is keyed
+        by uuid, and this is the only file that undoes that offline."""
+        return self.server_dir / "usercache.json"
+
+    @property
+    def whitelist(self) -> Path:
+        return self.server_dir / "whitelist.json"
+
+    def player_dir(self, kind: str) -> Path:
+        """`stats`, `advancements` or `data`, wherever this version keeps them.
+
+        26.x moved them under `world/players/`; older saves have them directly
+        in `world/`. Both layouts are still in the wild, so the one that exists
+        wins and a missing world falls through to the modern path.
+        """
+        modern = self.world_dir / "players" / kind
+        legacy = self.world_dir / ("playerdata" if kind == "data" else kind)
+        return legacy if legacy.is_dir() and not modern.is_dir() else modern
+
+    def region_dirs(self, kind: str = "region") -> dict[str, Path]:
+        """Dimension name -> its `region`/`entities`/`poi` directory.
+
+        Vanilla scatters dimensions three different ways -- `world/region`,
+        `world/DIM-1/region`, and `world/dimensions/<namespace>/<name>/region`
+        for anything a mod adds -- so all three are walked rather than guessed
+        between. Only directories that exist come back.
+        """
+        found: dict[str, Path] = {}
+        for name, base in (
+            ("overworld", self.world_dir),
+            ("the_nether", self.world_dir / "DIM-1"),
+            ("the_end", self.world_dir / "DIM1"),
+        ):
+            if (base / kind).is_dir():
+                found[name] = base / kind
+        dimensions = self.world_dir / "dimensions"
+        if dimensions.is_dir():
+            for namespace in sorted(p for p in dimensions.iterdir() if p.is_dir()):
+                for dimension in sorted(p for p in namespace.iterdir() if p.is_dir()):
+                    if (dimension / kind).is_dir():
+                        label = (
+                            dimension.name
+                            if namespace.name == "minecraft"
+                            else f"{namespace.name}:{dimension.name}"
+                        )
+                        found[label] = dimension / kind
+        return found
+
     @property
     def fetch_dir(self) -> Path:
         """Staging for fetched jars. Never `mods/` -- installing is a decision."""

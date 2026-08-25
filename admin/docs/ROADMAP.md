@@ -172,19 +172,127 @@ failure. `BackupJob` logs failures nobody reads, and cron now appends stderr to
 
 ## Tier 2 -- fun
 
-### 8. `mc wrapped` / leaderboards
-`world/stats/*.json` is vanilla-rich: playtime, blocks mined, mobs killed,
-distance by travel type, deaths. Empty until players are saved off, but it
-fills in. Terminal leaderboard or an HTML page for players.
+### 8. `mc wrapped` / leaderboards  [DONE]
+Implemented in `mcadmin/core/stats.py` (rendering in `mcadmin/ui/stats.py`).
+`mc wrapped` is the leaderboard, `mc wrapped <player>` one player's card,
+`--board deaths` a single table, `--json` for scripting.
 
-### 9. Death map
-Death coordinates and gravestone locations are already in the logs. Scatter-plot
-them over a rendered map; hot spots find the ravine everyone keeps falling into.
+The stats are not in `world/stats/` on this version: 26.x moved them to
+`world/players/{stats,advancements,data}/`. `Paths.player_dir()` accepts both,
+because the older layout is still what most documentation describes.
 
-### 10. Chunk forensics
-2918 `.mca` files. Parse region headers for chunk count and size distribution to
-track pregen progress and find bloated chunks (usually somebody's entity farm).
+First real run, across four players: 20.9h / 17.0h / 9.9h / 5.4h of playtime,
+7,332 blocks mined at the top, 101.5km travelled at the top, 24 deaths at the
+top. Three numbers needed correcting before any of that was true:
 
-### 11. `mc why-slow`
-Composite view: correlate the GC log against tick warnings and player join times
-to answer "was 6pm yesterday bad, and why".
+- **`play_time` is in ticks, not seconds.** It only advances 20/second while
+  the server keeps up, so it undercounts a laggy evening -- and it will
+  disagree with the wall-clock playtime `mc logs digest` computes from join and
+  leave lines. Both are right; they measure different things.
+- **Damage counters are `round(damage * 10)`, and damage is in half-hearts**,
+  so a heart is 20 of them. Read as raw hearts, the top player took 6,854 a
+  session; the real figure is 685, which is ~29 hearts per death and matches a
+  10-heart bar plus regen between fights.
+- **Advancements are mostly noise.** Moksha_ has 1,316 "done" and 30 that a
+  player would call advancements: mods grant hundreds of their own, and every
+  recipe unlock is an advancement too. The board counts `minecraft:` entries
+  that are not `minecraft:recipes/`.
+
+Stats files are only written when the server saves a player off, so every
+report carries the file mtime as an "as of" line rather than implying it is
+live.
+
+Still open: the HTML page for players. The terminal board is the half that gets
+used day to day.
+
+### 9. Death map  [DONE]
+Implemented in `mcadmin/core/deaths.py` (rendering in `mcadmin/ui/deaths.py`).
+`mc deaths [--since 3d] [--player X] [--dimension the_nether] [--json]`.
+
+Vanilla death messages carry the cause and never the position. The gravestone
+mod logs `Placed <player>'s gravestone at (x, y, z) in <dimension>` on the same
+second, so the two lines join into a death with both. The join is what makes
+this work, and the two ways it fails to join both matter:
+
+- **A placement with no death message is still a death** -- 4 of the 15 on this
+  server -- so the location survives even when the cause does not.
+- **A death message with no placement** happened where no grave could be
+  placed, or before the mod was installed. 18 of 33 deaths here are in that
+  group; they are counted and reported, never plotted, and the report says so
+  rather than quietly showing 15.
+
+First real run: 33 deaths, 15 located, 3 hot spots. Two nether clusters of 6
+apiece (piglins at 18,82,73; skeletons at 119,65,15) and one overworld cluster
+of 3, all falls, at 189,124,683. One grave was never collected -- diddy_bot
+still has gear at 134,73,22 in the nether.
+
+Details worth remembering:
+
+- Clustering is horizontal only. A ravine is one place at every depth, and
+  including y split the fall cluster into three.
+- Clustering is per dimension. Nether coordinates are 1:8 to overworld ones, so
+  the same numbers in two dimensions are not the same place -- there is a test
+  pinning exactly that.
+- The plot shrinks its width rather than its height when a region is taller
+  than it is wide. Squashing it into the height cap put the two axes on
+  different scales, which is a plot that lies about where things are.
+
+### 10. Chunk forensics  [DONE]
+Implemented in `mcadmin/core/regions.py` (rendering in `mcadmin/ui/regions.py`).
+`mc chunks [-d the_nether] [--kind region|entities|poi] [--timeline] [--json]`.
+
+Only the 8KiB header of each file is read -- 1024 location entries and 1024
+timestamps -- so scanning **1,150 region files and 832,604 chunks takes 0.7s**.
+Nothing per-chunk is kept: a histogram and a running top-N, and the rest is
+discarded as it goes.
+
+First real run: overworld 336,874 chunks / 2.53G, the end 421,201 / 1.62G, the
+nether 74,529 / 559M. 113 chunks over 64K, the largest 228K in the nether. 75M
+of the overworld is free space *inside* region files -- rewritten chunks leave
+their old sectors behind and region files never shrink.
+
+**242 of the 1,150 region files are zero bytes**, which is what the first
+version reported as 242 corrupt files. They are not damaged: the server creates
+a region file when something touches the area and only writes a header once a
+chunk in it is generated. They are counted as empty regions now, which also
+keeps the far rarer genuinely-truncated file visible instead of buried.
+
+Sizes are *allocated* sizes, rounded up to the 4KiB sector. The exact
+compressed length is in each chunk's own header, which would mean a seek per
+chunk -- 580,000 of them for the overworld -- to sharpen a number already right
+to within a sector.
+
+The timestamps make `--timeline` a pregen progress view: 72,569 nether chunks
+were last written on 08-23, 428 on 08-24, 1,532 on 08-25.
+
+### 11. `mc why-slow`  [DONE]
+Implemented in `mcadmin/core/slow.py` (rendering in `mcadmin/ui/slow.py`).
+`mc why-slow [--since 24h] [--at "yesterday 18:00"] [--bucket 10m] [--json]`.
+
+Four records of the same minutes, on one clock: overload warnings from the
+server log, pauses from the GC log, join/leave events, and Chunky's own
+progress lines. The arithmetic that matters is lost tick time against GC pause
+time in the *same* window -- that is what rules the heap out.
+
+First real run answered the question it was built for. The worst window in
+three days was **08-23 19:15, 319s of tick time lost**, and it was a Chunky
+pregeneration: 59,193 chunks in fifteen minutes, peaking at 296 chunks/s, with
+1,339 errors alongside it and one player online. Not players, not the heap.
+
+Three things the first version got wrong and now does not:
+
+- **"Not the heap" was being claimed with no GC data.** The GC logs rotate
+  after ~50M and had long since rolled past 08-23, so "G1 paused for 0ms"
+  actually meant "nothing was measured". Each bucket now records whether any GC
+  log covers it, and an uncovered window says the heap can be neither blamed
+  nor cleared.
+- **Summed lag is a floor, not a total.** The server logs "Can't keep up!" at
+  most once every 15 seconds however far behind it falls, so the real figure is
+  always higher. The report says "at least".
+- **Sessions have to be read from every record, not the window.** Extracting
+  events from the window alone reported an empty server for any window that
+  opened mid-session.
+
+The timeline strip folds to a fixed width by taking the *worst* bucket per
+column rather than the mean. Averaging is exactly the wrong summary for a line
+whose job is finding outages.
