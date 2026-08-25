@@ -1,0 +1,63 @@
+# ─────────────────────────────────────────────────────────────
+#  Bastion is a tool, not a server.
+#
+#  This working directory is a live Minecraft server: world saves,
+#  player data, secrets in server.properties, mod jars nobody may
+#  redistribute, and several hundred config files written by the mods
+#  themselves. None of it belongs on the remote, and none of it is
+#  what makes this repository useful -- you bring your own mods and
+#  generate your own configs.
+#
+#  So this is an allowlist, not a denylist. Ignore everything, then
+#  re-admit the tool. A denylist over a directory this noisy misses
+#  something eventually; this cannot.
+# ─────────────────────────────────────────────────────────────
+/*
+
+!/.gitignore
+!/LICENSE
+!/README.md
+!/admin/
+
+# ─────────────────────────────────────────────────────────────
+#  Inside admin/: the package, its tests and its docs -- but not its
+#  virtualenv, its caches, or the state it writes while running.
+# ─────────────────────────────────────────────────────────────
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Published by the supervisor while the server runs; meaningless once it exits.
+admin/.runtime.json
+
+# Log fingerprints and the metrics time series. Both are this server's
+# operating history: player names, session times, machine load.
+admin/*.db
+admin/.*.db
+# SQLite's write-ahead log and shared-memory sidecars. Both databases run in
+# WAL mode, so these hold rows not yet checkpointed into the .db -- the same
+# data, in files the patterns above do not match.
+*.db-wal
+*.db-shm
+
+# ─────────────────────────────────────────────────────────────
+#  This server's own setup, which happens to live under admin/.
+#  Useful here, meaningless to anyone else running the tool.
+# ─────────────────────────────────────────────────────────────
+admin/permissions/
+admin/docs/POST-PREGEN.md
+
+# ─────────────────────────────────────────────────────────────
+#  Editors / OS / local scratch
+# ─────────────────────────────────────────────────────────────
+*.swp
+*~
+.DS_Store
+Thumbs.db
+*.bak
+*.bak[0-9]

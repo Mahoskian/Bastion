@@ -1,0 +1,4 @@
+#!/bin/bash
+# Thin launcher for the mcadmin CLI -- runs from anywhere, no venv activation.
+# Resolves relative to this script, so moving the server directory just works.
+exec "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.venv/bin/mc" "$@"
