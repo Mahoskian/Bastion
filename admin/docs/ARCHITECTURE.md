@@ -22,6 +22,15 @@ down. `cli/__init__.py` registers the command groups; `snapshot`, `logs`,
 `metrics` and `mods` are sub-commands, and the rest are flattened onto the root
 so `mc start` does not become `mc server start`.
 
+Flattening costs the grouping a name hierarchy would have given, so
+`cli/__init__.py` carries it in one table instead — `LAYOUT` names the help
+panel each command sits in, and the order the panels and their contents print
+in. Nothing else decides it: typer would order the root help by registration,
+which always sinks every sub-command group below every flat command whatever
+the two are about. A command missing from `LAYOUT` falls into typer's default
+panel, which prints *above* the named ones, so the failure is loud; a test
+pins both directions of the table against the commands that actually exist.
+
 ## Core, by concern
 
 **Lifecycle** — `models.py` holds `Paths` and the JVM options, and is the one

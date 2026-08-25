@@ -84,6 +84,8 @@ named session, so `MC_SERVER_DIR` relocates the files, not a second instance.
 
 ## Commands
 
+`mc --help` groups these into the same sections used below.
+
 ```
 mc status                 server state, players online, key settings
 mc start [--heap 24G]     start supervised, in a detached tmux session
@@ -107,9 +109,9 @@ mc snapshot pause/resume  hold the scheduled runs during maintenance
 **Performance and health.**
 
 ```
-mc gc                     size the heap from the GC logs
-mc metrics sample|show    time series of load and GC behaviour
 mc logs tail|digest       digest shows only problems it hasn't reported before
+mc metrics sample|show    time series of load and GC behaviour
+mc gc                     size the heap from the GC logs
 mc why-slow               why a given hour was bad, from four logs at once
 mc chunks                 chunk counts, size distribution, and bloated chunks
 ```
