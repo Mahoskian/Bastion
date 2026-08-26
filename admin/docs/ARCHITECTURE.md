@@ -53,15 +53,40 @@ the JVM and restarts it when it dies; `controller.py` is the object every
 lifecycle command drives. `rcon.py` speaks the Source RCON protocol, and
 `properties.py` reads `server.properties` as typed values.
 
-**Notifications** — `notify.py` posts lifecycle events to Discord as a bot,
-over REST rather than a gateway connection: sending needs only an HTTPS POST,
-and the websocket exists to *receive*, which nothing here does. The events are
-raised from `supervisor.py` because it is the only process that witnesses every
-transition — `mc stop` signals it and `mc restart` deliberately bypasses it, so
-a notification hung off either command would miss every unattended restart and
+**Notifications** — `notify.py` posts to Discord as a bot, over REST rather
+than a gateway connection: sending needs only an HTTPS POST, and the websocket
+exists to *receive*, which nothing here does. Everything it sends is raised
+from `supervisor.py`, the only process that witnesses every transition —
+`mc stop` signals it and `mc restart` deliberately bypasses it, so a
+notification hung off either command would miss every unattended restart and
 every crash. An unconfigured server gets a `NullNotifier`, a broken config
 warns and degrades to one, and every send is wrapped: Discord must never be
 able to delay a restart.
+
+What it sends is deliberately short: a crash, and the crash-loop guard giving
+up. Everything else is state rather than news, and lives on the pinned board.
+
+**The status board** — `board.py` keeps one pinned message current instead of
+posting per transition. A start, a stop and a restart are things you already
+know about, because you typed them; six of those a day made the channel
+unmutable, and muting it lost the crash notification too. So the transitions
+moved to a `Board` the supervisor edits in place — an edit pings nobody, badges
+nothing, and does not bump the channel — and only the crash still posts.
+
+Two things make that work without a refresh loop. Times go out as Discord's
+`<t:epoch:R>` markup, which every client renders against its own clock and
+re-renders as that clock moves, so "up since 4 hours ago" stays true in a
+message last written at boot. And the message id is kept in `.board.json`, with
+the channel beside it: a 404 means the message was deleted and a new one is
+posted and pinned, while a 403 raises rather than posting, because replacing on
+every transition would rebuild exactly the feed this replaced.
+
+`Phase` is not `ServerState` on purpose. `ServerState` is what an observer can
+see, and from outside the box a crash and a clean restart are both just an
+absent JVM; the supervisor is the only thing that knows which happened.
+`mc notify board` writes the board from the observable state — for after the
+supervisor was killed outright, or the message was deleted — and can therefore
+only ever say the four things an observer can distinguish.
 
 One consequence of that split is worth stating: the supervisor outlives every
 `mc restart`, so a change to `supervisor.py` — or to anything it holds, like

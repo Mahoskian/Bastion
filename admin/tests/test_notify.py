@@ -151,31 +151,29 @@ def test_enabled_false_turns_it_off_without_deleting_the_token(tmp_path):
 # ----------------------------------------------------------------- notices
 
 
-def test_a_clean_exit_reads_as_a_restart_not_a_crash():
-    """`mc restart` asks the JVM to stop and lets the loop bring it back, so an
-    intentional restart looks like any other exit -- except that it is a 0."""
-    assert Notice.exited(0, 3600, 10).kind is EventKind.RESTARTING
+def test_only_the_interrupting_events_are_notices_at_all():
+    """Starting, stopping and restarting moved to the pinned board. What is
+    left here is what should still reach a phone -- keeping the enum honest is
+    what stops a routine transition quietly growing a notification again."""
+    assert set(EventKind) == {EventKind.CRASHED, EventKind.ABANDONED, EventKind.TEST}
 
 
-def test_a_dirty_exit_reads_as_a_crash():
-    notice = Notice.exited(1, 42, 10)
+def test_a_crash_says_what_exited_and_when_it_is_back():
+    notice = Notice.crashed(1, 42, 10)
     assert notice.kind is EventKind.CRASHED
     assert "Exit code 1" in (notice.detail or "")
 
 
 def test_an_embed_carries_a_title_and_a_colour():
-    embed = Notice.exited(1, 42, 10).embed()
+    embed = Notice.crashed(1, 42, 10).embed()
     assert embed["title"] == "Server crashed"
     assert isinstance(embed["color"], int)
     assert "42s" in str(embed["description"])
 
 
 def test_a_notice_without_detail_omits_the_description():
-    """The routine lifecycle notices are a title and nothing else: an operator
-    watching the channel wants to know the server is up, not how it booted."""
-    assert "description" not in Notice.ready().embed()
-    assert "description" not in Notice.stopped().embed()
-    assert "description" not in Notice.exited(0, 3600, 10).embed()
+    """An embed with an empty description renders as a gap under the title."""
+    assert "description" not in Notice(kind=EventKind.CRASHED).embed()
 
 
 # ----------------------------------------------------------------- transport
@@ -220,12 +218,26 @@ def bot() -> DiscordBot:
 
 
 def test_sending_posts_an_embed_to_the_channel(sent):
-    bot().send(Notice.ready())
+    bot().send(Notice.crashed(1, 42, 10))
     assert len(sent) == 1
     call = sent[0]
     assert call["method"] == "POST"
     assert call["url"].endswith(f"/channels/{CHANNEL}/messages")
-    assert call["body"]["embeds"][0]["title"] == "Server is up"
+    assert call["body"]["embeds"][0]["title"] == "Server crashed"
+
+
+def test_editing_patches_one_message_and_leaves_it_where_it_is(sent):
+    """An edit is what makes the board silent: no post, no ping, no bump."""
+    bot().edit("999", {"title": "Server Status: Running"})
+    call = sent[0]
+    assert call["method"] == "PATCH"
+    assert call["url"].endswith(f"/channels/{CHANNEL}/messages/999")
+
+
+def test_pinning_targets_the_channel_pins(sent):
+    bot().pin("999")
+    assert sent[0]["method"] == "PUT"
+    assert sent[0]["url"].endswith(f"/channels/{CHANNEL}/pins/999")
 
 
 def test_the_bot_token_is_sent_as_a_bot_authorization(sent):

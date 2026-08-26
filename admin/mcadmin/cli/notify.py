@@ -8,6 +8,8 @@ import stat
 
 import typer
 
+from ..core.board import Board, DiscordPinboard, PinState
+from ..core.controller import Online, ServerController
 from ..core.models import Paths
 from ..core.notify import ENV_CHANNEL, ENV_TOKEN, DiscordBot, DiscordConfig, Notice, NotifyError
 from ..ui import notify as view
@@ -37,7 +39,7 @@ def _source(paths: Paths) -> str:
 def status() -> None:
     """Show whether Discord notifications are configured, and from where."""
     paths = Paths.from_env()
-    view.show_config(_config(paths), _source(paths))
+    view.show_config(_config(paths), _source(paths), PinState.load(paths.board_file))
 
 
 @app.command()
@@ -90,6 +92,46 @@ def _diagnose(bot: DiscordBot, exc: NotifyError) -> str:
         f"{exc}\n        The bot IS in: {listed}. If the channel is in one of those, "
         "this is a\n        permission overwrite on the channel or its category."
     )
+
+
+@app.command()
+def board(
+    reset: bool = typer.Option(False, "--reset", help="Post a new message instead of editing."),
+) -> None:
+    """Write the pinned status message from what the server looks like now.
+
+    The supervisor keeps this current on its own. This is for the times it
+    could not: it was killed outright and never got to write "stopped", or the
+    message was deleted, or Discord was unreachable at the one moment that
+    mattered. It reads the live server rather than any stored phase, so it can
+    only say what an observer can see -- a crash is the supervisor's to report.
+    """
+    paths = Paths.from_env()
+    config = _config(paths)
+    if config is None:
+        fail("Discord is not configured yet -- run 'mc notify setup'.")
+    if reset:
+        # Forget the id and the next show posts a fresh message. The old one is
+        # left where it is: deleting somebody's channel history on a --reset is
+        # a bigger promise than this flag is making.
+        paths.board_file.unlink(missing_ok=True)
+
+    status = ServerController().status()
+    pinboard = DiscordPinboard(DiscordBot(config), paths.board_file, warn=_warn)
+    try:
+        with console.status("Updating the pinned status message..."):
+            pinboard.show(Board.observed(status, Online.parse(status.players)))
+    except NotifyError as exc:
+        fail(str(exc))
+
+    state = PinState.load(paths.board_file)
+    console.print(f"[bold green]Board[/] shows [bold]{status.state.description}[/].")
+    if state is not None:
+        console.print(f"[dim]Message {state.message_id} in channel {state.channel_id}[/]")
+
+
+def _warn(message: str) -> None:
+    console.print(f"[yellow]Note:[/] {message}")
 
 
 @app.command()

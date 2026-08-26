@@ -168,12 +168,14 @@ Implemented in `mcadmin/core/notify.py`, raised from `mcadmin/core/supervisor.py
 `mc notify setup` writes the token, `mc notify test` proves the path end to end,
 `mc notify status` says what is configured and from where.
 
-Six events, all from the supervisor: starting, up (once RCON answers),
+Six transitions, all from the supervisor: starting, up (once RCON answers),
 restarting, stopped, crashed, and gave up after the crash-loop guard trips.
 The supervisor is the emitter because it is the only thing that sees all of
 them — `mc stop` signals it, and `mc restart` deliberately leaves it alone and
 lets its loop bring the server back, so any notification attached to the CLI
 commands themselves would miss every unattended restart and every crash.
+
+Four of those six no longer post anything; see item 7d.
 
 Three things worth remembering:
 
@@ -197,6 +199,41 @@ itself started returning 429 -- so the diagnosis is now only asked for once a
 403 has already happened. It is worth asking then, because an uninvited bot
 authenticates perfectly and 403s on every channel in existence, which reads
 exactly like a channel-permission problem and is not one.
+
+### 7d. The pinned status board  [DONE]
+`mcadmin/core/board.py`, written by the same supervisor. Six posts a day for
+things the person reading them had just typed made the channel unmutable, and
+muting it lost the crash alert too — the one message that was actually worth a
+notification. So the state of the server moved into one pinned message that is
+edited in place, and only a crash (and the guard giving up) still posts.
+
+`mc notify board` writes that message from the observable state, for when the
+supervisor never got to: killed outright, or the message deleted.
+
+Four things worth remembering:
+
+- **An edit is silent.** No ping, no unread badge, no bump up the channel list.
+  That is the entire mechanism; everything else here is in service of it.
+- **`<t:epoch:R>` moves on its own.** Discord renders those against the
+  reader's clock and keeps re-rendering them, so "up since 4 hours ago" and
+  "back in 10 seconds" stay true in a message nothing has touched since boot.
+  A refresh loop was the obvious design and turned out to be unnecessary for
+  everything except the player count, which is a snapshot with a timestamp
+  under it instead.
+- **404 and 403 are opposite problems.** A deleted message should be replaced;
+  a permissions failure should not, because posting a replacement on every
+  transition would rebuild the exact feed this was built to remove. Only the
+  404 recreates.
+- **`Phase` is not `ServerState`.** From outside the box, a crash and a clean
+  restart are both an absent JVM. Collapsing the two enums would have thrown
+  away the only distinction the board exists to draw — so `Board.observed`,
+  which reads the live server, can only ever report four of the six phases.
+
+Still open: the count of who is online is only as fresh as the last transition.
+The supervisor already polls RCON while waiting for the boot, so a slow poll
+that edits only when the count *changes* would be nearly free — it was left out
+because it is the one part of the board that would need a loop, and the rest
+proved it did not.
 
 ### 7b. Slash commands  [read-only DONE]
 `mc listen` (`mcadmin/cli/listen.py`, embeds in `mcadmin/ui/discord.py`) answers

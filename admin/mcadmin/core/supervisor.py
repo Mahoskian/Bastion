@@ -17,6 +17,8 @@ import time
 from datetime import datetime
 from types import FrameType
 
+from .board import Board, Phase, Pinboard, pinboard_for, restart_at
+from .controller import Online
 from .models import JvmOptions, Paths, RuntimeState
 from .notify import Notice, Notifier, notifier_for
 from .rcon import RconError, connect
@@ -46,22 +48,25 @@ class Supervisor:
         restart_delay: float = RESTART_DELAY,
         max_rapid_restarts: int = MAX_RAPID_RESTARTS,
         notifier: Notifier | None = None,
+        pinboard: Pinboard | None = None,
     ) -> None:
         self.paths = paths
         self.jvm = jvm
         self.restart_delay = restart_delay
         self.max_rapid_restarts = max_rapid_restarts
         self.notifier = notifier or notifier_for(paths, self._say)
+        self.pinboard = pinboard or pinboard_for(paths, self._say)
         self._shutdown = threading.Event()
         self._process: subprocess.Popen[bytes] | None = None
         self._restarts = 0
+        self._started_at = datetime.now()
 
     # ------------------------------------------------------------- output
 
     def _say(self, message: str) -> None:
         print(f"[mc] {datetime.now():%H:%M:%S} {message}", flush=True)
 
-    # ------------------------------------------------------------- notifying
+    # ------------------------------------------------------------- announcing
 
     def _notify(self, notice: Notice) -> None:
         """Announce something, and never let announcing it matter.
@@ -70,27 +75,58 @@ class Supervisor:
         restart or take the supervisor down with it, so every failure here is
         logged and dropped -- including ones a notifier is not supposed to
         raise in the first place.
+
+        Reached only for a crash or a give-up. Everything else is `_show`,
+        which changes the pinned board without notifying anyone.
         """
         try:
             self.notifier.send(notice)
         except Exception as exc:  # noqa: BLE001 -- deliberate; see the docstring
             self._say(f"could not send the {notice.kind} notification: {exc}")
 
-    def _rcon_ready(self) -> bool:
+    def _show(self, phase: Phase, **fields: object) -> None:
+        """Move the pinned status board to a phase, swallowing any failure.
+
+        Heap and restart count are filled in here rather than at each call
+        site: they are true of the supervisor, not of the transition, and a
+        board that dropped them halfway through a run would look like the
+        server had changed shape.
+        """
+        # The transition is happening now unless a caller knows better -- the
+        # running board dates from the launch, not from the boot finishing.
+        fields.setdefault("since", datetime.now())
+        board = Board(
+            phase=phase,
+            heap=self.jvm.heap,
+            restarts=self._restarts,
+            **fields,  # type: ignore[arg-type]
+        )
+        try:
+            self.pinboard.show(board)
+        except Exception as exc:  # noqa: BLE001 -- deliberate; as above
+            self._say(f"could not update the status board to {phase}: {exc}")
+
+    def _list(self) -> str | None:
+        """RCON's answer to `list`, or None while the server cannot give one.
+
+        Answering this at all is what "ready" means here, and the answer also
+        happens to name everyone online -- so the board's player count costs
+        nothing beyond the round trip the readiness check was making anyway.
+        """
         try:
             with connect(timeout=3.0) as client:
-                return "players" in client.command("list").lower()
+                return client.command("list")
         except (RconError, OSError):
-            return False
+            return None
 
     def _watch_for_ready(self, process: subprocess.Popen[bytes]) -> None:
-        """Announce the server as up once it answers RCON, from a side thread.
+        """Move the board to Running once RCON answers, from a side thread.
 
         The JVM being alive is not the same as the server being playable --
-        this mod set spends over a minute between the two -- and "up" is the
-        message anyone waiting to play actually wants. It runs beside the loop
-        rather than in it because the loop's job is watching the process, and
-        blocking it here would delay noticing a crash during boot.
+        this mod set spends over a minute between the two -- and "playable" is
+        what anyone waiting to join is reading the board for. It runs beside
+        the loop rather than in it because the loop's job is watching the
+        process, and blocking it here would delay noticing a crash during boot.
         """
 
         def watch() -> None:
@@ -98,8 +134,14 @@ class Supervisor:
             while time.monotonic() < deadline:
                 if self._shutdown.is_set() or process.poll() is not None:
                     return
-                if self._rcon_ready():
-                    self._notify(Notice.ready())
+                reply = self._list()
+                if reply is not None and "players" in reply.lower():
+                    # `since` is the launch, not this moment: what a reader
+                    # wants from "up since" is how long the server has been
+                    # there, not how long ago it finished booting.
+                    self._show(
+                        Phase.RUNNING, since=self._started_at, players=Online.parse(reply)
+                    )
                     return
                 time.sleep(READY_POLL)
 
@@ -173,7 +215,9 @@ class Supervisor:
         """Launch the JVM and stay with it until it exits."""
         process = self._launch()
         self._process = process
+        self._started_at = datetime.now()
         self._publish(process.pid)
+        self._show(Phase.BOOTING, since=self._started_at)
         self._watch_for_ready(process)
         stop_sent = False
         while process.poll() is None:
@@ -198,7 +242,7 @@ class Supervisor:
 
                 if self._shutdown.is_set():
                     self._say("stop was requested -- not restarting.")
-                    self._notify(Notice.stopped())
+                    self._show(Phase.STOPPED)
                     break
 
                 rapid = rapid + 1 if lasted < MIN_HEALTHY_SECONDS else 0
@@ -207,14 +251,35 @@ class Supervisor:
                         f"[ERROR] {rapid} crashes in under {MIN_HEALTHY_SECONDS:.0f}s each -- "
                         "giving up rather than restart-looping. Check logs/latest.log."
                     )
+                    self._show(
+                        Phase.ABANDONED,
+                        detail=f"{rapid} crashes in a row. Not restarting again.",
+                    )
                     self._notify(Notice.abandoned(rapid, MIN_HEALTHY_SECONDS))
                     break
 
-                self._notify(Notice.exited(code, lasted, self.restart_delay))
+                # Exit code is the only thing separating the two exits that
+                # reach here. `mc restart` stops the JVM and leaves this loop
+                # to bring it back, so an intentional restart looks exactly
+                # like an unattended one -- except that it exited 0. That case
+                # moves the board and stays silent; a crash also posts, because
+                # a pinned message turning red is not something anyone sees at
+                # 3am.
+                back = restart_at(self.restart_delay)
+                if code == 0:
+                    self._show(Phase.RESTARTING, resumes_at=back)
+                else:
+                    self._show(
+                        Phase.CRASHED,
+                        resumes_at=back,
+                        detail=f"Exit code {code}.",
+                    )
+                    self._notify(Notice.crashed(code, lasted, self.restart_delay))
                 self._restarts += 1
                 self._say(f"restarting in {self.restart_delay:.0f}s (Ctrl-C to stay stopped)")
                 if self._shutdown.wait(self.restart_delay):
                     self._say("stop was requested -- not restarting.")
+                    self._show(Phase.STOPPED)
                     break
         finally:
             self._clear_state()

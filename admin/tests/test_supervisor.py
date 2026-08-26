@@ -11,6 +11,7 @@ import threading
 import pytest
 
 from mcadmin.core import supervisor as sup
+from mcadmin.core.board import Board, Phase
 from mcadmin.core.models import JvmOptions, Paths, RuntimeState
 from mcadmin.core.notify import EventKind, Notice
 from mcadmin.core.rcon import RconError
@@ -73,6 +74,18 @@ def isolated(tmp_path, monkeypatch):
 @pytest.fixture
 def paths(isolated):
     return Paths(server_dir=isolated)
+
+
+@pytest.fixture
+def answering_rcon(monkeypatch):
+    """A server that answers `list`, and drops the act quickly when stopped.
+
+    Without the shortened timeout a test would wait out the patience the
+    supervisor extends to a real multi-gigabyte world save.
+    """
+    monkeypatch.setattr(sup, "READY_POLL", 0.01)
+    monkeypatch.setattr(sup, "GRACEFUL_STOP_TIMEOUT", 0.2)
+    monkeypatch.setattr(sup, "connect", lambda **_: FakeRcon())
 
 
 def test_crash_loop_guard_stops_relaunching(paths):
@@ -138,7 +151,11 @@ def test_request_shutdown_is_idempotent(paths):
     assert supervisor._shutdown.is_set()
 
 
-# ------------------------------------------------------------ notifications
+# ------------------------------------------------------ announcing
+
+# Two channels now, and which one a transition goes down is the whole point:
+# the board changes silently on every transition, and the notifier fires only
+# for the ones that should reach a phone.
 
 
 class Recorder:
@@ -155,53 +172,101 @@ class Recorder:
         return [notice.kind for notice in self.notices]
 
 
-def test_a_requested_stop_announces_a_stop(paths):
-    recorder = Recorder()
-    supervisor = FakeJvm(paths, JvmOptions(), lifetime="30", notifier=recorder)
+class Pinboard:
+    """A board that remembers every phase it was moved through."""
+
+    def __init__(self) -> None:
+        self.boards: list[Board] = []
+
+    def show(self, board: Board) -> None:
+        self.boards.append(board)
+
+    @property
+    def phases(self) -> list[Phase]:
+        return [board.phase for board in self.boards]
+
+
+def watched(paths, **kwargs) -> tuple[FakeJvm, Recorder, Pinboard]:
+    recorder, pinboard = Recorder(), Pinboard()
+    supervisor = FakeJvm(paths, JvmOptions(), notifier=recorder, pinboard=pinboard, **kwargs)
+    return supervisor, recorder, pinboard
+
+
+def test_a_requested_stop_only_moves_the_board(paths):
+    """The noisy case that started all this: nobody needs a notification about
+    a stop they typed themselves."""
+    supervisor, recorder, pinboard = watched(paths, lifetime="30")
     threading.Timer(0.2, supervisor.request_shutdown).start()
     supervisor.run()
-    assert recorder.kinds == [EventKind.STOPPED]
+    assert pinboard.phases == [Phase.BOOTING, Phase.STOPPED]
+    assert recorder.kinds == []
 
 
-def test_a_crash_is_announced_before_the_restart(paths):
-    recorder = Recorder()
-    supervisor = FakeJvm(
-        paths, JvmOptions(), exit_code=1, restart_delay=0.01, notifier=recorder
-    )
+def test_a_crash_moves_the_board_and_notifies(paths):
+    """The one transition worth interrupting somebody for."""
+    supervisor, recorder, pinboard = watched(paths, exit_code=1, restart_delay=0.01)
     supervisor.run()
-    assert EventKind.CRASHED in recorder.kinds
-    assert EventKind.RESTARTING not in recorder.kinds
+    assert Phase.CRASHED in pinboard.phases
+    assert recorder.kinds.count(EventKind.CRASHED) >= 1
 
 
 def test_a_clean_exit_the_supervisor_did_not_ask_for_reads_as_a_restart(paths):
     """This is `mc restart`: it stops the JVM and leaves the supervisor alone,
     so the loop sees a clean exit it never requested and brings the server
     back. Announcing that as a crash would cry wolf on every restart."""
-    recorder = Recorder()
-    supervisor = FakeJvm(paths, JvmOptions(), restart_delay=0.01, notifier=recorder)
+    supervisor, recorder, pinboard = watched(paths, restart_delay=0.01)
     supervisor.run()
-    assert EventKind.RESTARTING in recorder.kinds
+    assert Phase.RESTARTING in pinboard.phases
+    assert Phase.CRASHED not in pinboard.phases
+    # A restart-loop of clean exits still trips the guard at the end -- what
+    # must not happen is any of those exits being reported as a crash.
     assert EventKind.CRASHED not in recorder.kinds
 
 
-def test_the_crash_loop_guard_announces_giving_up(paths):
-    recorder = Recorder()
-    supervisor = FakeJvm(
-        paths, JvmOptions(), restart_delay=0.01, max_rapid_restarts=2, notifier=recorder
-    )
+def test_a_restart_carries_the_time_it_will_be_back(paths):
+    """The countdown is a Discord timestamp, so it ticks down in the client
+    without this ever editing the message again."""
+    supervisor, _, pinboard = watched(paths, restart_delay=0.01)
     supervisor.run()
-    assert recorder.kinds == [EventKind.RESTARTING, EventKind.ABANDONED]
+    restarting = next(b for b in pinboard.boards if b.phase is Phase.RESTARTING)
+    assert restarting.resumes_at is not None
+    assert f":{int(restarting.resumes_at.timestamp())}:R>" in str(restarting.embed())
 
 
-def test_the_server_is_announced_as_up_once_it_answers_rcon(paths, monkeypatch):
+def test_the_crash_loop_guard_announces_giving_up(paths):
+    supervisor, recorder, pinboard = watched(paths, restart_delay=0.01, max_rapid_restarts=2)
+    supervisor.run()
+    assert pinboard.phases[-1] is Phase.ABANDONED
+    assert recorder.kinds == [EventKind.ABANDONED]
+
+
+def test_the_board_turns_green_once_the_server_answers_rcon(paths, answering_rcon):
     """The JVM being alive is not the same as the server being playable."""
-    monkeypatch.setattr(sup, "READY_POLL", 0.01)
-    monkeypatch.setattr(sup, "connect", lambda **_: FakeRcon())
-    recorder = Recorder()
-    supervisor = FakeJvm(paths, JvmOptions(), lifetime="30", notifier=recorder)
+    supervisor, recorder, pinboard = watched(paths, lifetime="30")
     threading.Timer(0.4, supervisor.request_shutdown).start()
     supervisor.run()
-    assert EventKind.READY in recorder.kinds
+    assert Phase.RUNNING in pinboard.phases
+    assert recorder.kinds == []
+
+
+def test_the_running_board_counts_the_players_rcon_named(paths, answering_rcon):
+    """The readiness check already asked `list`; the count is free from it."""
+    supervisor, _, pinboard = watched(paths, lifetime="30")
+    threading.Timer(0.4, supervisor.request_shutdown).start()
+    supervisor.run()
+    running = next(b for b in pinboard.boards if b.phase is Phase.RUNNING)
+    assert running.players is not None
+    assert running.players.maximum == 20
+
+
+def test_the_running_board_dates_from_the_launch_not_the_boot_finishing(paths, answering_rcon):
+    """`Up since` should answer how long the server has been there."""
+    supervisor, _, pinboard = watched(paths, lifetime="30")
+    threading.Timer(0.4, supervisor.request_shutdown).start()
+    supervisor.run()
+    booting = next(b for b in pinboard.boards if b.phase is Phase.BOOTING)
+    running = next(b for b in pinboard.boards if b.phase is Phase.RUNNING)
+    assert running.since == booting.since
 
 
 def test_a_notifier_that_raises_never_breaks_the_loop(paths):
@@ -217,8 +282,21 @@ def test_a_notifier_that_raises_never_breaks_the_loop(paths):
     assert supervisor.launches == 1
 
 
+def test_a_board_that_raises_never_breaks_the_loop(paths):
+    """The same promise, for the channel that now carries most transitions."""
+
+    class Broken:
+        def show(self, board: Board) -> None:
+            raise RuntimeError("discord is still on fire")
+
+    supervisor = FakeJvm(paths, JvmOptions(), lifetime="30", pinboard=Broken())
+    threading.Timer(0.2, supervisor.request_shutdown).start()
+    supervisor.run()
+    assert supervisor.launches == 1
+
+
 def test_an_unconfigured_server_still_supervises(paths):
-    """No config file in `paths`, so the default notifier is the null one."""
+    """No config file in `paths`, so both channels default to the null one."""
     supervisor = FakeJvm(paths, JvmOptions(), lifetime="30")
     threading.Timer(0.2, supervisor.request_shutdown).start()
     supervisor.run()

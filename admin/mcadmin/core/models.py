@@ -98,6 +98,16 @@ class Paths(BaseModel):
         return self.admin_dir / ".listener.json"
 
     @property
+    def board_file(self) -> Path:
+        """Which Discord message the pinned status board is.
+
+        Not a credential and not secret, but it is this machine's -- a clone
+        editing another server's status message would be a strange bug to
+        diagnose, so it stays out of git with the rest of the runtime state.
+        """
+        return self.admin_dir / ".board.json"
+
+    @property
     def notify_config(self) -> Path:
         """Bot token and channel id for Discord notifications.
 

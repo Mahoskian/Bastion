@@ -1,4 +1,4 @@
-"""Telling Discord what the server just did.
+"""Telling Discord the things worth interrupting somebody for.
 
 The supervisor is the only process that witnesses every lifecycle transition:
 it launches the JVM, waits with it, sees it exit, and decides whether that exit
@@ -7,6 +7,14 @@ doing the work itself, and `mc restart` asks the JVM to stop and leaves the
 supervisor alone -- so raising events from there catches operator actions and
 crashes through one code path, instead of bolting a notification onto each CLI
 command and still missing every unattended restart.
+
+Not every transition is worth a message, though. Starting, stopping and
+restarting are ordinary, and posting one each turned the channel into a feed
+nobody could leave unmuted -- so those moved to `core.board`, which keeps a
+single pinned message current instead. What is left here is what should still
+arrive as a notification: a crash, and the supervisor giving up on restarting
+after several. Both are transports over the same bot; the split is about which
+things deserve a ping, not about how they are sent.
 
 Sending is REST, not a gateway connection. A bot token can POST straight to a
 channel; the websocket exists to *receive* events, which nothing here needs.
@@ -60,11 +68,13 @@ class NotifyError(RuntimeError):
 
 
 class EventKind(StrEnum):
-    """The lifecycle moments worth waking a phone for."""
+    """The lifecycle moments worth waking a phone for.
 
-    READY = "ready"
-    RESTARTING = "restarting"
-    STOPPED = "stopped"
+    Short on purpose. A start or a stop is something you already know about,
+    because you are the one who typed it; a crash at 3am is not. Everything
+    that is merely *state* lives on the pinned board in `core.board`.
+    """
+
     CRASHED = "crashed"
     ABANDONED = "abandoned"
     TEST = "test"
@@ -73,9 +83,6 @@ class EventKind(StrEnum):
 # Title and embed colour per event. Discord takes a colour as one integer, not
 # as a hex string, so these are ints rather than the "#2ecc71" they look like.
 PRESENTATION: dict[EventKind, tuple[str, int]] = {
-    EventKind.READY: ("Server is up", 0x2ECC71),
-    EventKind.RESTARTING: ("Server is restarting", 0x3498DB),
-    EventKind.STOPPED: ("Server is down", 0x95A5A6),
     EventKind.CRASHED: ("Server crashed", 0xE74C3C),
     EventKind.ABANDONED: ("Server gave up", 0x992D22),
     EventKind.TEST: ("Bastion is connected", 0x5865F2),
@@ -112,26 +119,16 @@ class Notice(BaseModel):
     # --------------------------------------------------------- the moments
 
     @classmethod
-    def ready(cls) -> Notice:
-        return cls(kind=EventKind.READY)
+    def crashed(cls, code: int, ran_for: float, restart_delay: float) -> Notice:
+        """A JVM exit nobody asked for, which the supervisor will restart from.
 
-    @classmethod
-    def stopped(cls) -> Notice:
-        return cls(kind=EventKind.STOPPED)
-
-    @classmethod
-    def exited(cls, code: int, ran_for: float, restart_delay: float) -> Notice:
-        """A JVM exit the supervisor is about to restart from.
-
-        Exit code decides the wording, because it is the only thing that
-        separates the two. `mc restart` works by asking the JVM to stop and
-        leaving the supervisor's loop to bring it back, so an intentional
-        restart reaches this point looking exactly like an unattended one --
-        except that the JVM shut itself down cleanly and exited 0. A crash
-        does not.
+        Only a dirty exit gets here. `mc restart` works by asking the JVM to
+        stop and leaving the supervisor's loop to bring it back, so an
+        intentional restart reaches the supervisor looking exactly like an
+        unattended one -- except that the JVM shut itself down cleanly and
+        exited 0. That case updates the board and says nothing; this one is the
+        other branch, and it is the reason this module still exists.
         """
-        if code == 0:
-            return cls(kind=EventKind.RESTARTING)
         return cls(
             kind=EventKind.CRASHED,
             detail=(
@@ -154,7 +151,10 @@ class Notice(BaseModel):
     def test(cls) -> Notice:
         return cls(
             kind=EventKind.TEST,
-            detail="Sent by `mc notify test`. Lifecycle events will appear here.",
+            detail=(
+                "Sent by `mc notify test`. Crashes will appear here, and the "
+                "pinned status message keeps everything else."
+            ),
         )
 
 
@@ -363,18 +363,20 @@ class DiscordBot:
         self,
         embed: dict[str, object],
         attachments: Sequence[Attachment] = (),
-    ) -> None:
+    ) -> str | None:
         """Post one embed to the channel, optionally carrying files.
 
         Discord takes files as multipart with the message itself in a
         `payload_json` part -- there is no JSON-only way to attach one, which
         is why this is not simply another field on the body.
+
+        Returns the new message's id, which is what makes a message editable
+        later. Most callers post and forget; `core.board` keeps the id.
         """
         payload: dict[str, object] = {"embeds": [embed]}
         path = f"/channels/{self.config.channel_id}/messages"
         if not attachments:
-            self._request("POST", path, payload)
-            return
+            return self._message_id(self._request("POST", path, payload))
 
         oversized = [file for file in attachments if not file.fits]
         if oversized:
@@ -390,7 +392,29 @@ class DiscordBot:
             {"id": index, "filename": file.filename} for index, file in enumerate(attachments)
         ]
         body, content_type = _multipart(payload, attachments)
-        self._send("POST", path, body, content_type, timeout=UPLOAD_TIMEOUT)
+        return self._message_id(
+            self._send("POST", path, body, content_type, timeout=UPLOAD_TIMEOUT)
+        )
+
+    @staticmethod
+    def _message_id(created: object) -> str | None:
+        """The id out of a created message, or None if Discord did not say."""
+        if isinstance(created, dict) and "id" in created:
+            return str(created["id"])
+        return None
+
+    def edit(self, message_id: str, embed: dict[str, object]) -> None:
+        """Replace an existing message's embed, leaving the message in place.
+
+        An edit notifies nobody -- no ping, no unread badge, no bump up the
+        channel list. That silence is the entire reason `core.board` exists.
+        """
+        path = f"/channels/{self.config.channel_id}/messages/{message_id}"
+        self._request("PATCH", path, {"embeds": [embed]})
+
+    def pin(self, message_id: str) -> None:
+        """Pin a message. Needs Manage Messages, which sending does not."""
+        self._request("PUT", f"/channels/{self.config.channel_id}/pins/{message_id}")
 
     def identify(self) -> str:
         """The bot's own username -- proof the token works, without posting."""
