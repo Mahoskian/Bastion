@@ -163,14 +163,18 @@ def test_a_dirty_exit_reads_as_a_crash():
 
 
 def test_an_embed_carries_a_title_and_a_colour():
-    embed = Notice.ready(80).embed()
-    assert embed["title"] == "Server is up"
+    embed = Notice.exited(1, 42, 10).embed()
+    assert embed["title"] == "Server crashed"
     assert isinstance(embed["color"], int)
-    assert "80s" in str(embed["description"])
+    assert "42s" in str(embed["description"])
 
 
 def test_a_notice_without_detail_omits_the_description():
-    assert "description" not in Notice(kind=EventKind.TEST).embed()
+    """The routine lifecycle notices are a title and nothing else: an operator
+    watching the channel wants to know the server is up, not how it booted."""
+    assert "description" not in Notice.ready().embed()
+    assert "description" not in Notice.stopped().embed()
+    assert "description" not in Notice.exited(0, 3600, 10).embed()
 
 
 # ----------------------------------------------------------------- transport
@@ -215,12 +219,12 @@ def bot() -> DiscordBot:
 
 
 def test_sending_posts_an_embed_to_the_channel(sent):
-    bot().send(Notice.starting("12G"))
+    bot().send(Notice.ready())
     assert len(sent) == 1
     call = sent[0]
     assert call["method"] == "POST"
     assert call["url"].endswith(f"/channels/{CHANNEL}/messages")
-    assert call["body"]["embeds"][0]["title"] == "Server starting"
+    assert call["body"]["embeds"][0]["title"] == "Server is up"
 
 
 def test_the_bot_token_is_sent_as_a_bot_authorization(sent):

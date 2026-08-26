@@ -54,7 +54,6 @@ class NotifyError(RuntimeError):
 class EventKind(StrEnum):
     """The lifecycle moments worth waking a phone for."""
 
-    STARTING = "starting"
     READY = "ready"
     RESTARTING = "restarting"
     STOPPED = "stopped"
@@ -66,10 +65,9 @@ class EventKind(StrEnum):
 # Title and embed colour per event. Discord takes a colour as one integer, not
 # as a hex string, so these are ints rather than the "#2ecc71" they look like.
 PRESENTATION: dict[EventKind, tuple[str, int]] = {
-    EventKind.STARTING: ("Server starting", 0xE5A50A),
     EventKind.READY: ("Server is up", 0x2ECC71),
-    EventKind.RESTARTING: ("Server restarting", 0x3498DB),
-    EventKind.STOPPED: ("Server stopped", 0x95A5A6),
+    EventKind.RESTARTING: ("Server is restarting", 0x3498DB),
+    EventKind.STOPPED: ("Server is down", 0x95A5A6),
     EventKind.CRASHED: ("Server crashed", 0xE74C3C),
     EventKind.ABANDONED: ("Server gave up", 0x992D22),
     EventKind.TEST: ("Bastion is connected", 0x5865F2),
@@ -106,25 +104,12 @@ class Notice(BaseModel):
     # --------------------------------------------------------- the moments
 
     @classmethod
-    def starting(cls, heap: str, restarts: int = 0) -> Notice:
-        detail = f"Heap {heap}."
-        if restarts:
-            detail += f" Restart {restarts} of this supervisor."
-        return cls(kind=EventKind.STARTING, detail=detail)
+    def ready(cls) -> Notice:
+        return cls(kind=EventKind.READY)
 
     @classmethod
-    def ready(cls, booted_in: float) -> Notice:
-        return cls(
-            kind=EventKind.READY,
-            detail=f"Answering RCON after {human_seconds(booted_in)}.",
-        )
-
-    @classmethod
-    def stopped(cls, ran_for: float) -> Notice:
-        return cls(
-            kind=EventKind.STOPPED,
-            detail=f"Stopped on request. This run lasted {human_seconds(ran_for)}.",
-        )
+    def stopped(cls) -> Notice:
+        return cls(kind=EventKind.STOPPED)
 
     @classmethod
     def exited(cls, code: int, ran_for: float, restart_delay: float) -> Notice:
@@ -137,15 +122,14 @@ class Notice(BaseModel):
         except that the JVM shut itself down cleanly and exited 0. A crash
         does not.
         """
-        back_in = f"Back in {human_seconds(restart_delay)}."
         if code == 0:
-            return cls(
-                kind=EventKind.RESTARTING,
-                detail=f"Ran for {human_seconds(ran_for)}. {back_in}",
-            )
+            return cls(kind=EventKind.RESTARTING)
         return cls(
             kind=EventKind.CRASHED,
-            detail=f"Exit code {code} after {human_seconds(ran_for)}. {back_in}",
+            detail=(
+                f"Exit code {code} after {human_seconds(ran_for)}. "
+                f"Back in {human_seconds(restart_delay)}."
+            ),
         )
 
     @classmethod

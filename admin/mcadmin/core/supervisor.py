@@ -83,7 +83,7 @@ class Supervisor:
         except (RconError, OSError):
             return False
 
-    def _watch_for_ready(self, process: subprocess.Popen[bytes], since: float) -> None:
+    def _watch_for_ready(self, process: subprocess.Popen[bytes]) -> None:
         """Announce the server as up once it answers RCON, from a side thread.
 
         The JVM being alive is not the same as the server being playable --
@@ -99,7 +99,7 @@ class Supervisor:
                 if self._shutdown.is_set() or process.poll() is not None:
                     return
                 if self._rcon_ready():
-                    self._notify(Notice.ready(time.monotonic() - since))
+                    self._notify(Notice.ready())
                     return
                 time.sleep(READY_POLL)
 
@@ -174,8 +174,7 @@ class Supervisor:
         process = self._launch()
         self._process = process
         self._publish(process.pid)
-        self._notify(Notice.starting(self.jvm.heap, self._restarts))
-        self._watch_for_ready(process, time.monotonic())
+        self._watch_for_ready(process)
         stop_sent = False
         while process.poll() is None:
             if self._shutdown.is_set() and not stop_sent:
@@ -199,7 +198,7 @@ class Supervisor:
 
                 if self._shutdown.is_set():
                     self._say("stop was requested -- not restarting.")
-                    self._notify(Notice.stopped(lasted))
+                    self._notify(Notice.stopped())
                     break
 
                 rapid = rapid + 1 if lasted < MIN_HEALTHY_SECONDS else 0

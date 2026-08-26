@@ -26,6 +26,7 @@ let them write their own configs. Bastion attaches to whatever is there. See
 | OS | Linux |
 | Python | 3.12+, installed and run through [uv](https://docs.astral.sh/uv/) |
 | Discord | optional — `discord.py`, pulled in by `uv sync`, only used by `mc listen` |
+| Charts | optional — `uv sync --extra charts` adds matplotlib for the chart replies |
 | `tmux` | the server runs inside a detached session |
 | `restic` | snapshots — `sudo apt install restic` |
 | Java | whatever your Minecraft version needs |
@@ -144,6 +145,19 @@ survive a reboot, start it from cron:
 
 Commands are registered per server, so they appear the moment it connects
 rather than after the hour that global registration can take.
+
+`/wrapped` and `/deaths` answer with a rendered chart inside the embed: the
+leaderboards as bars, a player's card against the server best, and the deaths as
+a scatter per dimension with the hot spots circled. Charts need matplotlib,
+which is an optional extra so the base install stays small:
+
+```bash
+uv sync --extra charts
+```
+
+Without it the listener answers with the same numbers as text, so the commands
+work either way. `/status` and `/players` stay text: they are a handful of
+key/value facts, and a plot of seven facts is decoration.
 
 Nothing here changes the server, so nothing checks a permission. Commands that
 do would need one — Discord's `default_member_permissions` hides a command from

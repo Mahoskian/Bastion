@@ -226,6 +226,41 @@ both are right: stats files are cumulative, while the death map can only see
 the logs that have not rotated away. Same shape as the two playtime figures in
 item 8.
 
+### 7c. Charts in the replies  [DONE]
+`mcadmin/ui/charts.py` renders PNGs that the embed carries via
+`attachment://`, so the plot sits inside the embed rather than under it.
+matplotlib is an optional extra (`uv sync --extra charts`); without it the same
+commands answer as text, and the embed keeps the fields the chart would have
+replaced.
+
+`/status` and `/players` deliberately stay text. They are a handful of
+key/value facts, and the form heuristic says that is a stat block, not a plot.
+
+Four things worth remembering, three of them found by rendering and looking:
+
+- **Bar geometry cannot live in data units.** The first version set the corner
+  radius and the bar thickness in data coordinates, so the same code drew
+  invisible rounding on a leaderboard whose x-axis ran to 12,445 and giant
+  lozenges on a card whose x-axis ran 0 to 1. Bars are now a line with a
+  point-width, square at the baseline and capped with a round marker at the
+  data end.
+- **Labels outside the axes need offsets in points, not x-units.** Same failure
+  one layer up: values placed at `x * 1.03` collided as soon as the axes got
+  narrower.
+- **Title spacing in figure fractions is not portable between figures.** A gap
+  that clears a 15pt title on a tall figure overlaps it on a short one. The
+  offsets are in inches now.
+- **A hot spot is drawn at the radius the clustering actually used.** A
+  fixed-size ring at the centroid floated over empty ground when the members
+  were spread out, which read as "something is here" when nothing was.
+
+The palette is the validated categorical set stepped for a dark surface, and
+the slot order is the colourblind-safety mechanism rather than a preference --
+checked with the palette validator against the surface actually rendered on,
+not eyeballed. The death map faces a real constraint from that: scatter needs
+all-pairs separation, where only the first three slots clear the floors, which
+is one more reason the dimensions are faceted rather than coloured.
+
 Still open: the privileged half. `/restart`, `/stop` and `/snapshot now` need
 `default_member_permissions` on the command *and* a server-side check of the
 invoking member's roles, because the guild's Integrations settings can override

@@ -84,6 +84,19 @@ does not restart on crash the way the supervisor does — discord.py reconnects
 and resumes on its own, so the failure that loop would catch is handled a layer
 down.
 
+`ui/charts.py` is a third rendering target beside the terminal and the embed,
+under the same rule: a pure function of a model, returning PNG bytes, and
+`None` when there is nothing worth plotting so the caller falls back to text
+rather than posting empty axes. Three things constrain it. It renders from a
+worker thread, so it uses only matplotlib's object-oriented API -- pyplot's
+global current-figure state would let two concurrent commands draw into each
+other. It carries its own dark surface rather than a transparent background,
+which would look broken on whichever Discord theme was not tested. And a PNG
+has no tooltip layer, so every value a reader needs is direct-labelled or on an
+axis. Those labels are positioned by offsets in *points*, never in data units:
+they sit outside the axes, so anything measured in x re-crowds the moment the
+axes width changes.
+
 The listener is the one place where a `cli` module is not thin, because a slash
 command *is* a command line: it parses arguments, calls `core`, and hands the
 result to `ui`. The two things Discord adds are that `core` is called through

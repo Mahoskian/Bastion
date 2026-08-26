@@ -133,7 +133,11 @@ def players(online: Online | None, raw: str | None) -> dict[str, object]:
 # ----------------------------------------------------------------- stats
 
 
-def leaderboards(roster: Roster, boards: list[Board], top: int = 3) -> dict[str, object]:
+def leaderboards(
+    roster: Roster, boards: list[Board], top: int = 3, charted: bool = False
+) -> dict[str, object]:
+    """`charted` drops the per-board fields: when the chart is attached it
+    already carries them, and repeating them is a wall of duplicate text."""
     if not roster.players:
         return _embed(
             "Leaderboards",
@@ -143,7 +147,7 @@ def leaderboards(roster: Roster, boards: list[Board], top: int = 3) -> dict[str,
         )
     embed = _embed("Leaderboards", BLURPLE)
     fields: list[dict[str, object]] = embed["fields"]  # type: ignore[assignment]
-    for board in boards:
+    for board in [] if charted else boards:
         if not board.standings:
             continue
         lines = [
@@ -168,12 +172,19 @@ def unknown_player(asked: str, known: list[str]) -> dict[str, object]:
     )
 
 
-def player_card(player: PlayerStats, won: list[str], updated: datetime | None) -> dict[str, object]:
+def player_card(
+    player: PlayerStats, won: list[str], updated: datetime | None, charted: bool = False
+) -> dict[str, object]:
     description = ""
     if won:
         description = "Tops the board for " + ", ".join(f"**{title}**" for title in won) + "."
     embed = _embed(player.name, BLURPLE, description)
     fields: list[dict[str, object]] = embed["fields"]  # type: ignore[assignment]
+    if charted:
+        footer = _freshness(updated)
+        if footer:
+            embed["footer"] = footer
+        return embed
 
     fields.append(_field("Playtime", human_seconds(player.play_seconds)))
     fields.append(_field("Blocks mined", f"{player.blocks_mined:,}"))
@@ -197,7 +208,12 @@ def player_card(player: PlayerStats, won: list[str], updated: datetime | None) -
 # ----------------------------------------------------------------- deaths
 
 
-def death_map(found: DeathMap, spots: list[Hotspot]) -> dict[str, object]:
+def death_map(
+    found: DeathMap, spots: list[Hotspot], charted: bool = False
+) -> dict[str, object]:
+    """`charted` drops the hot-spot fields -- the plot shows those far better
+    than a coordinate triple does. Causes and per-player counts stay either
+    way, because the chart does not carry them."""
     total = len(found.deaths)
     if not total:
         return _embed("Deaths", GREY, "No deaths in this window. Suspicious.")
@@ -212,7 +228,7 @@ def death_map(found: DeathMap, spots: list[Hotspot]) -> dict[str, object]:
     embed = _embed("Deaths", RED, description)
     fields: list[dict[str, object]] = embed["fields"]  # type: ignore[assignment]
 
-    for spot in spots[:3]:
+    for spot in [] if charted else spots[:3]:
         fields.append(
             _field(
                 f"Hotspot \N{EM DASH} {spot.count} deaths",

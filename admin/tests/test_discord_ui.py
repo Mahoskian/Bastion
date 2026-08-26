@@ -231,3 +231,95 @@ def test_hotspots_and_causes_are_reported():
     names = " ".join(field["name"] for field in embed["fields"])
     assert "Hotspot" in names
     assert "Top causes" in names
+
+
+# ------------------------------------------------------------------ charts
+
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+@pytest.fixture
+def mpl():
+    """Charts are an optional extra; skip cleanly when it is not installed."""
+    return pytest.importorskip("matplotlib")
+
+
+def test_charts_report_whether_they_can_render():
+    from mcadmin.ui import charts
+
+    assert charts.available() is True or charts.available() is False
+
+
+def test_nothing_to_plot_returns_no_chart_rather_than_empty_axes(mpl):
+    from mcadmin.ui import charts
+
+    assert charts.death_map(DeathMap(), []) is None
+    assert charts.leaderboards(Roster(), []) is None
+    assert charts.player_card(player(), Roster(), []) is None
+
+
+def test_deaths_with_no_position_are_not_plottable(mpl):
+    """They are counted in the embed, but there is nowhere to put them."""
+    from mcadmin.ui import charts
+
+    found = DeathMap(deaths=[died("Steve", 0, 0, 1, located_=False)])
+    assert charts.death_map(found, []) is None
+
+
+def test_the_death_map_renders_a_png(mpl):
+    from mcadmin.ui import charts
+
+    found = DeathMap(deaths=[died("Steve", i * 10, i * 10, i) for i in range(1, 6)])
+    png = charts.death_map(found, hotspots(found.located))
+    assert png is not None and png.startswith(PNG_MAGIC)
+
+
+def test_the_leaderboards_render_a_png(mpl):
+    from mcadmin.ui import charts
+
+    roster = Roster(players=[player("Steve"), player("Alex")])
+    png = charts.leaderboards(roster, boards(roster))
+    assert png is not None and png.startswith(PNG_MAGIC)
+
+
+def test_a_player_card_renders_a_png(mpl):
+    from mcadmin.ui import charts
+
+    roster = Roster(players=[player("Steve"), player("Alex")])
+    png = charts.player_card(roster.players[0], roster, ["Playtime"])
+    assert png is not None and png.startswith(PNG_MAGIC)
+
+
+def test_more_boards_than_hues_never_cycles_the_palette(mpl):
+    """A ninth series is never a generated hue -- the tail is dropped instead."""
+    from mcadmin.ui import charts
+
+    roster = Roster(players=[player("Steve")])
+    many = [
+        Board(
+            key=f"b{i}",
+            title=f"Board {i}",
+            unit=Unit.COUNT,
+            standings=[Standing(rank=1, player="Steve", value=10)],
+        )
+        for i in range(12)
+    ]
+    assert charts.leaderboards(roster, many) is not None
+
+
+def test_a_charted_leaderboard_does_not_repeat_itself_as_text():
+    """The chart carries the boards; duplicating them is a wall of text."""
+    roster = Roster(players=[player("Steve")])
+    charted = check_embed(view.leaderboards(roster, boards(roster), charted=True))
+    plain = check_embed(view.leaderboards(roster, boards(roster), charted=False))
+    assert charted["fields"] == []
+    assert plain["fields"]
+
+
+def test_a_charted_death_map_keeps_what_the_plot_does_not_show():
+    """Hot spots move into the plot; causes and per-player counts do not."""
+    found = DeathMap(deaths=[died("Steve", 0, 0, i) for i in range(1, 6)])
+    charted = check_embed(view.death_map(found, hotspots(found.located), charted=True))
+    names = {field["name"] for field in charted["fields"]}
+    assert not any(name.startswith("Hotspot") for name in names)
+    assert "Top causes" in names and "Most deaths" in names

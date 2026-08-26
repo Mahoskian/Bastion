@@ -28,6 +28,7 @@ hand the result to `ui` -- with two differences Discord imposes:
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 
 import typer
@@ -40,6 +41,7 @@ from ..core.listener import ListenerController, ListenerState
 from ..core.models import Paths
 from ..core.notify import DiscordConfig, NotifyError
 from ..core.properties import properties
+from ..ui import charts
 from ..ui import discord as view
 from ..ui import listener as listener_view
 from ..ui.console import console, fail
@@ -67,33 +69,45 @@ def _config() -> DiscordConfig:
 
 # ------------------------------------------------------------------ answers
 
+# An answer is an embed, and optionally a chart for it to carry. `None` for the
+# chart means matplotlib is not installed or there was nothing worth plotting,
+# and the embed then carries the full text instead of a trimmed version of it.
+Answer = tuple[dict[str, object], bytes | None, str]
 
-def _status_embed() -> dict[str, object]:
+
+def _status_embed() -> Answer:
     control = ServerController()
     status = control.status()
-    return view.server_status(status, properties(), Online.parse(status.players))
+    return view.server_status(status, properties(), Online.parse(status.players)), None, ""
 
 
-def _players_embed() -> dict[str, object]:
+def _players_embed() -> Answer:
     raw = ServerController().players()
-    return view.players(Online.parse(raw), raw)
+    return view.players(Online.parse(raw), raw), None, ""
 
 
-def _wrapped_embed(player: str | None) -> dict[str, object]:
+def _wrapped_embed(player: str | None) -> Answer:
     roster = st.load()
+    boards = st.boards(roster)
     if not player:
-        return view.leaderboards(roster, st.boards(roster))
+        png = charts.leaderboards(roster, boards) if charts.available() else None
+        return view.leaderboards(roster, boards, charted=png is not None), png, "wrapped.png"
     found = roster.find(player)
     if found is None:
-        return view.unknown_player(player, [p.name for p in roster.players])
-    return view.player_card(found, st.titles(roster, found), roster.updated)
+        return view.unknown_player(player, [p.name for p in roster.players]), None, ""
+    won = st.titles(roster, found)
+    png = charts.player_card(found, roster, won) if charts.available() else None
+    card = view.player_card(found, won, roster.updated, charted=png is not None)
+    return card, png, "card.png"
 
 
-def _deaths_embed() -> dict[str, object]:
+def _deaths_embed() -> Answer:
     paths = Paths.from_env()
     files = lg.log_files(paths.logs_dir)
     found = dt.collect(list(lg.parse(files))) if files else dt.DeathMap()
-    return view.death_map(found, dt.hotspots(found.located))
+    spots = dt.hotspots(found.located)
+    png = charts.death_map(found, spots) if charts.available() else None
+    return view.death_map(found, spots, charted=png is not None), png, "deaths.png"
 
 
 # ------------------------------------------------------------------ managing
@@ -181,14 +195,23 @@ def run() -> None:
         """Defer, do the slow synchronous work off the loop, then edit it in."""
         await interaction.response.defer()
         try:
-            embed = await asyncio.to_thread(builder)
+            embed, png, filename = await asyncio.to_thread(builder)
         except Exception as exc:  # noqa: BLE001 -- one bad command must not kill the bot
             console.print(f"[red]/{label} failed:[/] {exc}")
             await interaction.followup.send(
                 f"`/{label}` failed on the server side: `{exc}`", ephemeral=True
             )
             return
-        await interaction.followup.send(embed=discord.Embed.from_dict(embed))
+        if png is None:
+            await interaction.followup.send(embed=discord.Embed.from_dict(embed))
+            return
+        # The embed points at the file travelling with it, so the chart renders
+        # inside the embed rather than as a bare image bolted underneath it.
+        embed["image"] = {"url": f"attachment://{filename}"}
+        await interaction.followup.send(
+            embed=discord.Embed.from_dict(embed),
+            file=discord.File(io.BytesIO(png), filename=filename),
+        )
 
     @tree.command(name="status", description="Server state, players and key settings.")
     async def status_command(interaction: discord.Interaction) -> None:

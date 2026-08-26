@@ -160,7 +160,7 @@ def test_a_requested_stop_announces_a_stop(paths):
     supervisor = FakeJvm(paths, JvmOptions(), lifetime="30", notifier=recorder)
     threading.Timer(0.2, supervisor.request_shutdown).start()
     supervisor.run()
-    assert recorder.kinds == [EventKind.STARTING, EventKind.STOPPED]
+    assert recorder.kinds == [EventKind.STOPPED]
 
 
 def test_a_crash_is_announced_before_the_restart(paths):
@@ -190,8 +190,7 @@ def test_the_crash_loop_guard_announces_giving_up(paths):
         paths, JvmOptions(), restart_delay=0.01, max_rapid_restarts=2, notifier=recorder
     )
     supervisor.run()
-    assert recorder.kinds[-1] is EventKind.ABANDONED
-    assert recorder.kinds.count(EventKind.STARTING) == 2
+    assert recorder.kinds == [EventKind.RESTARTING, EventKind.ABANDONED]
 
 
 def test_the_server_is_announced_as_up_once_it_answers_rcon(paths, monkeypatch):
