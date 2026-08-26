@@ -9,12 +9,15 @@ precisely so this can be true.
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
+from mcadmin.core.changelog import Changelog
 from mcadmin.core.controller import Online, Status
 from mcadmin.core.deaths import Death, DeathMap, hotspots
 from mcadmin.core.models import RuntimeState, ServerState
+from mcadmin.core.mrpack import ModFile, PackResult, PackSpec
 from mcadmin.core.properties import ServerProperties
 from mcadmin.core.stats import Board, PlayerStats, Roster, Standing, Unit, boards
 from mcadmin.ui import discord as view
@@ -323,3 +326,65 @@ def test_a_charted_death_map_keeps_what_the_plot_does_not_show():
     names = {field["name"] for field in charted["fields"]}
     assert not any(name.startswith("Hotspot") for name in names)
     assert "Top causes" in names and "Most deaths" in names
+
+
+# ----------------------------------------------------------------- packs
+
+
+def pack(mods: list[str]) -> PackResult:
+    return PackResult(
+        path=Path("mrpacks/HammysServer-2026-08-26.mrpack"),
+        size=2_226_517,
+        linked=[ModFile(name=n, sha1="s", sha512="s", size=1, url="https://x") for n in mods],
+        bundled=[],
+    )
+
+
+def released(before: list[str], after: list[str]):
+    log, _ = Changelog().record(before, "1.0.0", datetime(2026, 8, 25, 15, 10))
+    _, release = log.record(after, "1.0.1", datetime(2026, 8, 26, 9, 46))
+    return release
+
+
+def test_a_release_post_leads_with_what_changed():
+    release = released(["a-1.0.jar", "old-1.0.jar"], ["a-1.0.jar", "new-1.0.jar"])
+    embed = check_embed(view.pack_release(release, pack(["a-1.0.jar", "new-1.0.jar"]), PackSpec()))
+    assert embed["title"] == "New MrPack Release"
+    names = [field["name"] for field in embed["fields"]]
+    assert names[0] == "ChangeLog"
+    assert "Added (1)" in names and "Removed (1)" in names
+    assert "HammysServer-2026-08-26.mrpack" in embed["footer"]["text"]
+
+
+def test_a_release_post_names_the_updated_builds_on_both_sides():
+    release = released(["lithium-fabric-0.25.3.jar"], ["lithium-fabric-0.26.0.jar"])
+    embed = check_embed(view.pack_release(release, pack(["lithium-fabric-0.26.0.jar"]), PackSpec()))
+    updated = next(f for f in embed["fields"] if f["name"] == "Updated (1)")
+    assert "lithium-fabric-0.25.3.jar" in updated["value"]
+    assert "lithium-fabric-0.26.0.jar" in updated["value"]
+
+
+def test_a_release_post_survives_a_pack_with_150_mods():
+    """The first build lists every mod, which is far past Discord's field
+    limit -- so the list is capped and says how many it did not show."""
+    mods = [f"mod{i}-1.0.jar" for i in range(150)]
+    _, release = Changelog().record(mods, "1.0.0", datetime(2026, 8, 26, 9, 46))
+    embed = check_embed(view.pack_release(release, pack(mods), PackSpec()))
+    listing = next(f for f in embed["fields"] if f["name"] == "Mods")
+    assert "and 138 more" in listing["value"]
+
+
+def test_a_release_post_with_no_pack_attached_says_why():
+    """A release post with no file and no explanation reads as a bug."""
+    release = released(["a-1.0.jar"], ["b-1.0.jar"])
+    embed = check_embed(view.pack_release(release, pack(["b-1.0.jar"]), PackSpec(), attached=False))
+    file_field = next(f for f in embed["fields"] if f["name"] == "File")
+    assert "over what Discord accepts" in file_field["value"]
+
+
+def test_a_release_post_with_nothing_to_report_is_still_valid():
+    log, _ = Changelog().record(["a-1.0.jar"], "1.0.0", datetime(2026, 8, 25))
+    release = log.release(["a-1.0.jar"], "1.0.1", datetime(2026, 8, 26))
+    embed = check_embed(view.pack_release(release, pack(["a-1.0.jar"]), PackSpec()))
+    changelog = next(f for f in embed["fields"] if f["name"] == "ChangeLog")
+    assert changelog["value"] == "no mod changes"

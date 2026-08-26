@@ -69,6 +69,21 @@ the notifier — does not take effect until the supervisor process itself is
 cycled with `mc stop && mc start`. A restart re-launches the JVM, not the
 Python.
 
+`notify.py` grew a file upload for the client pack: a release built by
+`mc mrpack` is announced with the pack itself attached. Files are the one thing
+Discord will not take as JSON, so `post` builds the multipart body by hand
+rather than adding a dependency, and checks the size against the limit before
+spending the upload — a pack Discord would refuse is announced without the file
+and says so, because a release post that silently failed is worse than one
+admitting the pack is too big to carry.
+
+That announcement follows the same rule as the lifecycle events, for the same
+reason: an unconfigured server announces nothing and says nothing about it, a
+broken config warns rather than raising, and a failed post is reported without
+failing the command. Discord must never be able to take down the thing it is
+reporting on — for the supervisor that means a restart, and here it means a
+pack that was already built and already recorded.
+
 **Discord** — `notify.py` speaks out, `cli/listen.py` listens in, and they share
 only the config file and the bot identity. Listening is a gateway websocket
 because it is outbound: nothing on the box hosting the world becomes reachable
@@ -126,6 +141,27 @@ three are read-only, and none of them needs a running server.
 163 jars is three requests. `mods.py` turns those answers into a verdict per
 jar. `mrpack.py` builds the client pack, and `manifest.py` renders the files
 that stand in for jars a repository cannot legally carry.
+
+`changelog.py` is the pack's memory. The mods folder holds only the present, so
+without it "what changed since last week" stops being answerable the moment a
+jar is swapped — it keeps the set as of the last release, and every release as a
+diff against the one before it. The part that is not bookkeeping is pairing: an
+updated mod arrives as a removal and an addition, because the version lives in
+the filename and nothing else separates the two. `identity` strips the
+version-ish tokens off a jar name so both halves land on the same key, and the
+pairing is believed only when it is unambiguous — one out and one in — because a
+wrong line in a file nobody re-checks is worse than an honest unpaired pair.
+Two files come out, for the two readers: `pack-history.json` is the state the
+next build diffs against, and `CHANGELOG.md` is that history rendered. Both
+follow `manifest.py`'s rule that a write whose bytes match is a no-op, so a diff
+in either always means a real change in the pack.
+
+The diff is taken from the jar names in the mods folder, before anything is
+built, which is what lets it decide whether to build at all: the folder *is* the
+pack, so a run that would produce the released set does no work and posts
+nothing. It is also why `mc mrpack` writes the history only after the zip
+succeeds — a build that raised leaves the record describing the pack that still
+exists rather than one that was never produced.
 
 ## Data flow, in one example
 

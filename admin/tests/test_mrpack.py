@@ -71,6 +71,15 @@ def test_spec_takes_versions_from_the_server_jar(tmp_path):
     assert spec.version == "9.9.9"
 
 
+def test_an_explicit_version_overrides_the_one_in_the_jars_name(tmp_path):
+    """`--mc` and `--loader` describe a pack for something this server is not
+    running, so they have to win over what the launcher jar says -- passing
+    both used to collide with the defaults and raise a TypeError."""
+    (tmp_path / "fabric-server-mc.26.2-loader.0.19.3-launcher.1.1.2.jar").write_text("")
+    spec = PackSpec.from_paths(Paths(server_dir=tmp_path), mc_version="26.1", loader="0.19.2")
+    assert (spec.mc_version, spec.loader) == ("26.1", "0.19.2")
+
+
 def test_manifest_entry_shape_is_what_modrinth_expects():
     mod = ModFile(name="a.jar", sha1="s1", sha512="s512", size=7, url="https://x/a.jar")
     entry = mod.manifest_entry()

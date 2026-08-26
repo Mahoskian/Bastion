@@ -13,15 +13,18 @@ and matches how `core.notify` already builds the payloads it sends.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 
+from ..core.changelog import Release
 from ..core.controller import Online, Status
 from ..core.deaths import DeathMap, Hotspot
 from ..core.models import ServerState
+from ..core.mrpack import PackResult, PackSpec
 from ..core.properties import ServerProperties
 from ..core.stats import DAMAGE_PER_HEART, Board, PlayerStats, Roster, Unit, short
 from ..core.units import human_distance, human_seconds
-from .format import human_age
+from .format import human_age, human_size
 
 BLURPLE = 0x5865F2
 GREEN = 0x2ECC71
@@ -39,6 +42,10 @@ STATE_COLOUR = {
 # Discord's own ceilings. A field value over 1024 characters is rejected
 # outright, so anything player-supplied or unbounded is trimmed to fit.
 FIELD_LIMIT = 1024
+# A pack has 150 mods in it, and the first release lists every one. Discord
+# would silently swallow the overflow at FIELD_LIMIT mid-word; a stated count
+# of what was left out reads better than an ellipsis.
+LIST_LIMIT = 12
 MEDALS = ("\N{FIRST PLACE MEDAL}", "\N{SECOND PLACE MEDAL}", "\N{THIRD PLACE MEDAL}")
 
 
@@ -47,6 +54,14 @@ def _field(name: str, value: str, inline: bool = True) -> dict[str, object]:
     if len(text) > FIELD_LIMIT:
         text = text[: FIELD_LIMIT - 1] + "\N{HORIZONTAL ELLIPSIS}"
     return {"name": name, "value": text or "\N{EM DASH}", "inline": inline}
+
+
+def _listed(names: Sequence[str], limit: int = LIST_LIMIT) -> str:
+    """A bullet list, capped, saying how many it did not show."""
+    shown = [f"`{name}`" for name in names[:limit]]
+    if len(names) > limit:
+        shown.append(f"\N{HORIZONTAL ELLIPSIS} and {len(names) - limit} more")
+    return "\n".join(shown)
 
 
 def _embed(title: str, colour: int, description: str = "") -> dict[str, object]:
@@ -246,4 +261,66 @@ def death_map(
     if players_by_deaths:
         listed = "\n".join(f"{who} \N{EM DASH} {n}" for who, n in players_by_deaths)
         fields.append(_field("Most deaths", listed))
+    return embed
+
+
+# ----------------------------------------------------------------- packs
+
+
+def pack_release(
+    release: Release,
+    result: PackResult,
+    spec: PackSpec,
+    attached: bool = True,
+) -> dict[str, object]:
+    """The announcement that goes out with a freshly built .mrpack.
+
+    `attached` is false when the file was too big for Discord to carry. The
+    embed then says so rather than going out looking like the pack is there --
+    a release post with no pack and no explanation is worse than no post.
+    """
+    embed = _embed(
+        "New MrPack Release",
+        BLURPLE,
+        f"**{spec.name}** `{spec.version}`\n"
+        f"Minecraft {spec.mc_version} \N{MIDDLE DOT} Fabric Loader {spec.loader} "
+        f"\N{MIDDLE DOT} {result.total} mods \N{MIDDLE DOT} {human_size(result.size)}",
+    )
+    fields: list[dict[str, object]] = embed["fields"]  # type: ignore[assignment]
+    fields.append(_field("ChangeLog", release.summary, False))
+
+    if release.initial:
+        fields.append(_field("Mods", _listed(release.added), False))
+    else:
+        if release.added:
+            fields.append(_field(f"Added ({len(release.added)})", _listed(release.added), False))
+        if release.removed:
+            fields.append(
+                _field(f"Removed ({len(release.removed)})", _listed(release.removed), False)
+            )
+        if release.updated:
+            changes = [
+                f"`{change.mod}` \N{EM DASH} {change.before} \N{RIGHTWARDS ARROW} {change.after}"
+                for change in release.updated[:LIST_LIMIT]
+            ]
+            if len(release.updated) > LIST_LIMIT:
+                changes.append(
+                    f"\N{HORIZONTAL ELLIPSIS} and {len(release.updated) - LIST_LIMIT} more"
+                )
+            fields.append(
+                _field(f"Updated ({len(release.updated)})", "\n".join(changes), False)
+            )
+
+    if not attached:
+        fields.append(
+            _field(
+                "File",
+                f"`{result.path.name}` is {human_size(result.size)}, over what Discord "
+                "accepts here \N{EM DASH} ask the admin for it directly.",
+                False,
+            )
+        )
+    embed["footer"] = {
+        "text": f"{result.path.name} \N{MIDDLE DOT} built {release.built_at:%Y-%m-%d %H:%M}"
+    }
     return embed

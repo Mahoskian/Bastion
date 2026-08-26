@@ -40,9 +40,14 @@ class PackSpec(BaseModel):
 
     @classmethod
     def from_paths(cls, paths: Paths, **overrides) -> PackSpec:
-        """Take the versions from the server jar rather than hard-coding them."""
+        """Take the versions from the server jar rather than hard-coding them.
+
+        An override replaces what the jar said rather than colliding with it:
+        `--mc` and `--loader` exist precisely to describe a pack for something
+        other than what this server is running.
+        """
         minecraft, loader = paths.versions()
-        return cls(mc_version=minecraft, loader=loader, **overrides)
+        return cls(**{"mc_version": minecraft, "loader": loader, **overrides})
 
     @property
     def summary(self) -> str:

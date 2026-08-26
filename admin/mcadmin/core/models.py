@@ -249,6 +249,22 @@ class Paths(BaseModel):
         return mods_dir / "README.md"
 
     @property
+    def pack_history(self) -> Path:
+        """The client pack's release history, as state rather than prose.
+
+        `client-install/mods/` has no memory: once a jar is swapped, what the
+        previous pack contained is unknowable. This file is what the next build
+        diffs against, and the only thing that can answer "what changed, and
+        when". Machine-written -- `pack_changelog` is the copy to read.
+        """
+        return self.server_dir / "client-install" / "pack-history.json"
+
+    @property
+    def pack_changelog(self) -> Path:
+        """The same history rendered for a person, newest first."""
+        return self.server_dir / "client-install" / "CHANGELOG.md"
+
+    @property
     def mrpack_dir(self) -> Path:
         return self.server_dir / "mrpacks"
 

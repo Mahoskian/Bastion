@@ -21,7 +21,8 @@ import json
 import os
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+import uuid
+from collections.abc import Callable, Sequence
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
@@ -35,6 +36,13 @@ API = "https://discord.com/api/v10"
 # Discord requires bots to identify themselves, and rejects some default agents.
 USER_AGENT = "DiscordBot (https://github.com/Mahoskian/Bastion, 0.1)"
 TIMEOUT = 10.0
+# Uploading a modpack is megabytes over whatever uplink the box has, so it gets
+# its own timeout. Ten seconds is right for a lifecycle embed and wrong here.
+UPLOAD_TIMEOUT = 120.0
+# What Discord accepts per message from a bot in a server with no boost level.
+# A pack over this is refused with a 40005 rather than truncated, so the size is
+# worth knowing *before* spending the upload.
+UPLOAD_LIMIT = 10 * 1024 * 1024
 ENV_TOKEN = "MC_DISCORD_TOKEN"
 ENV_CHANNEL = "MC_DISCORD_CHANNEL"
 
@@ -211,6 +219,33 @@ class DiscordConfig(BaseModel):
             raise NotifyError(f"{path.name}: {exc}") from exc
 
 
+class Attachment(BaseModel):
+    """A file to send alongside an embed, already read into memory.
+
+    Read rather than streamed because the multipart body has to be built whole
+    to be signed with a boundary anyway, and because a pack that cannot fit in
+    memory cannot fit in a Discord message either.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    filename: str
+    content: bytes
+
+    @classmethod
+    def read(cls, path: Path) -> Attachment:
+        return cls(filename=path.name, content=path.read_bytes())
+
+    @property
+    def size(self) -> int:
+        return len(self.content)
+
+    @property
+    def fits(self) -> bool:
+        """Whether Discord will take it. Asked before the upload, not after."""
+        return self.size <= UPLOAD_LIMIT
+
+
 class Notifier(Protocol):
     """Anything that can deliver a Notice."""
 
@@ -224,6 +259,37 @@ class NullNotifier:
         return None
 
 
+def _multipart(payload: dict[str, object], attachments: Sequence[Attachment]) -> tuple[bytes, str]:
+    """A multipart/form-data body, and the Content-Type header that names it.
+
+    Written out by hand rather than pulled from a library: the whole point of
+    this module is that posting to Discord costs one stdlib import, and one
+    boundary plus two part headers is not worth a dependency.
+    """
+    boundary = uuid.uuid4().hex
+    marker = f"--{boundary}".encode()
+    parts = [
+        marker,
+        b'Content-Disposition: form-data; name="payload_json"',
+        b"Content-Type: application/json",
+        b"",
+        json.dumps(payload).encode(),
+    ]
+    for index, file in enumerate(attachments):
+        parts += [
+            marker,
+            (
+                f'Content-Disposition: form-data; name="files[{index}]"; '
+                f'filename="{file.filename}"'
+            ).encode(),
+            b"Content-Type: application/octet-stream",
+            b"",
+            file.content,
+        ]
+    parts += [f"--{boundary}--".encode(), b""]
+    return b"\r\n".join(parts), f"multipart/form-data; boundary={boundary}"
+
+
 class DiscordBot:
     """Posts to one channel as a bot, over REST."""
 
@@ -233,17 +299,23 @@ class DiscordBot:
 
     # ------------------------------------------------------------- transport
 
-    def _request(self, method: str, path: str, body: dict | None = None) -> object:
-        data = json.dumps(body).encode() if body is not None else None
+    def _send(
+        self,
+        method: str,
+        path: str,
+        data: bytes | None = None,
+        content_type: str | None = None,
+        timeout: float | None = None,
+    ) -> object:
         headers = {
             "Authorization": f"Bot {self.config.token}",
             "User-Agent": USER_AGENT,
         }
-        if data is not None:
-            headers["Content-Type"] = "application/json"
+        if content_type is not None:
+            headers["Content-Type"] = content_type
         request = urllib.request.Request(f"{API}{path}", data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
                 return json.load(response)
         except urllib.error.HTTPError as exc:
             raise NotifyError(self._explain(exc.code), exc.code) from exc
@@ -252,6 +324,10 @@ class DiscordBot:
         except json.JSONDecodeError:
             # Some endpoints answer 204 with no body; that is still a success.
             return None
+
+    def _request(self, method: str, path: str, body: dict | None = None) -> object:
+        data = json.dumps(body).encode() if body is not None else None
+        return self._send(method, path, data, "application/json" if data is not None else None)
 
     def _explain(self, status: int) -> str:
         """Discord's status codes, as the thing you have to go and fix."""
@@ -269,6 +345,11 @@ class DiscordBot:
                 f"there is no channel {channel} (404) -- turn on Developer Mode in Discord "
                 "and copy the id from the channel's right-click menu."
             )
+        if status == 413:
+            return (
+                "Discord refused the upload as too large (413) -- this server's boost "
+                "level allows less than the file being sent."
+            )
         if status == 429:
             return "Discord is rate-limiting this bot (429)."
         return f"Discord returned {status}."
@@ -276,11 +357,40 @@ class DiscordBot:
     # ------------------------------------------------------------- sending
 
     def send(self, notice: Notice) -> None:
-        self._request(
-            "POST",
-            f"/channels/{self.config.channel_id}/messages",
-            {"embeds": [notice.embed()]},
-        )
+        self.post(notice.embed())
+
+    def post(
+        self,
+        embed: dict[str, object],
+        attachments: Sequence[Attachment] = (),
+    ) -> None:
+        """Post one embed to the channel, optionally carrying files.
+
+        Discord takes files as multipart with the message itself in a
+        `payload_json` part -- there is no JSON-only way to attach one, which
+        is why this is not simply another field on the body.
+        """
+        payload: dict[str, object] = {"embeds": [embed]}
+        path = f"/channels/{self.config.channel_id}/messages"
+        if not attachments:
+            self._request("POST", path, payload)
+            return
+
+        oversized = [file for file in attachments if not file.fits]
+        if oversized:
+            names = ", ".join(
+                f"{file.filename} ({file.size / 1_048_576:.1f}M)" for file in oversized
+            )
+            raise NotifyError(
+                f"too large for Discord's {UPLOAD_LIMIT // 1_048_576}M limit: {names}"
+            )
+        # Naming every part here is what lets Discord match `files[n]` to the
+        # attachment metadata; without it the filenames are Discord's guess.
+        payload["attachments"] = [
+            {"id": index, "filename": file.filename} for index, file in enumerate(attachments)
+        ]
+        body, content_type = _multipart(payload, attachments)
+        self._send("POST", path, body, content_type, timeout=UPLOAD_TIMEOUT)
 
     def identify(self) -> str:
         """The bot's own username -- proof the token works, without posting."""

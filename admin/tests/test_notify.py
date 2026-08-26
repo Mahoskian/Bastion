@@ -17,6 +17,7 @@ import pytest
 from mcadmin.core import notify
 from mcadmin.core.models import Paths
 from mcadmin.core.notify import (
+    Attachment,
     DiscordBot,
     DiscordConfig,
     EventKind,
@@ -300,3 +301,96 @@ def test_an_unreachable_discord_is_a_notify_error(monkeypatch):
     monkeypatch.setattr(notify.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(NotifyError, match="could not reach Discord"):
         bot().send(Notice.test())
+
+
+# ----------------------------------------------------------------- uploads
+
+
+@pytest.fixture
+def uploaded(monkeypatch):
+    """Capture a request whose body is multipart rather than JSON."""
+    calls: list[dict] = []
+
+    def fake_urlopen(request, timeout=None):
+        calls.append(
+            {
+                "content_type": request.headers.get("Content-type", ""),
+                "body": request.data,
+                "timeout": timeout,
+            }
+        )
+        return FakeResponse({})
+
+    monkeypatch.setattr(notify.urllib.request, "urlopen", fake_urlopen)
+    return calls
+
+
+def test_a_post_without_files_is_still_plain_json(sent):
+    """Attaching nothing must not turn every embed into a multipart body."""
+    bot().post({"title": "Hi"})
+    assert sent[0]["headers"]["Content-type"] == "application/json"
+    assert sent[0]["body"] == {"embeds": [{"title": "Hi"}]}
+
+
+def test_a_file_is_posted_as_multipart_beside_the_embed(uploaded):
+    bot().post({"title": "New MrPack Release"}, [Attachment(filename="p.mrpack", content=b"ZIP")])
+    call = uploaded[0]
+    assert call["content_type"].startswith("multipart/form-data; boundary=")
+    body = call["body"]
+    assert b'name="payload_json"' in body
+    assert b'name="files[0]"; filename="p.mrpack"' in body
+    assert b"ZIP" in body
+    # The embed still travels with it, in the payload part.
+    assert b"New MrPack Release" in body
+
+
+def test_every_file_is_named_in_the_payload_so_discord_matches_them_up(uploaded):
+    files = [
+        Attachment(filename="pack.mrpack", content=b"ZIP"),
+        Attachment(filename="modrinth.index.json", content=b"{}"),
+    ]
+    bot().post({"title": "Release"}, files)
+    body = uploaded[0]["body"]
+    start = body.index(b'name="payload_json"')
+    payload = json.loads(body[start:].split(b"\r\n\r\n", 1)[1].split(b"\r\n--", 1)[0])
+    assert payload["attachments"] == [
+        {"id": 0, "filename": "pack.mrpack"},
+        {"id": 1, "filename": "modrinth.index.json"},
+    ]
+    assert b'name="files[1]"; filename="modrinth.index.json"' in body
+
+
+def test_an_upload_gets_longer_than_ten_seconds(uploaded):
+    """Ten seconds is right for an embed and wrong for two megabytes."""
+    bot().post({"title": "Release"}, [Attachment(filename="p.mrpack", content=b"ZIP")])
+    assert uploaded[0]["timeout"] == notify.UPLOAD_TIMEOUT
+
+
+def test_an_oversized_file_is_refused_before_it_is_uploaded(uploaded):
+    """Discord rejects it anyway; spending the upload first to find that out is
+    minutes of a slow uplink for a 40005."""
+    big = Attachment(filename="huge.mrpack", content=b"x" * (notify.UPLOAD_LIMIT + 1))
+    with pytest.raises(NotifyError, match="too large"):
+        bot().post({"title": "Release"}, [big])
+    assert uploaded == []
+
+
+def test_a_file_that_fits_says_so():
+    assert Attachment(filename="a", content=b"x").fits
+    assert not Attachment(filename="a", content=b"x" * (notify.UPLOAD_LIMIT + 1)).fits
+
+
+def test_an_attachment_is_read_from_disk_under_its_own_name(tmp_path):
+    path = tmp_path / "HammysServer-2026-08-26.mrpack"
+    path.write_bytes(b"ZIP")
+    file = Attachment.read(path)
+    assert (file.filename, file.content, file.size) == (path.name, b"ZIP", 3)
+
+
+def test_a_refused_upload_says_what_the_limit_was(monkeypatch):
+    def fake_urlopen(request, timeout=None):
+        raise urllib.error.HTTPError(request.full_url, 413, "Payload Too Large", {}, None)
+
+    monkeypatch.setattr(notify.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(NotifyError, match="too large"):
+        bot().post({"title": "R"}, [Attachment(filename="p.mrpack", content=b"ZIP")])

@@ -206,7 +206,7 @@ mc deaths                 plot deaths and find the spot that keeps killing
 mc mods check             outdated mods, and mods that block a Minecraft upgrade
 mc mods fetch|install     stage jars, then install them — archiving what they replace
 mc mods manifest          regenerate the tracked mod lists (--check to detect drift)
-mc mrpack                 build a Modrinth .mrpack for players
+mc mrpack                 build a Modrinth .mrpack for players, when the mods changed
 ```
 
 `mc why-slow` puts the overload warnings, the GC pauses, the join times and the
@@ -228,6 +228,30 @@ version and download url — the file to commit in place of jars you may not
 redistribute, and `--check` fails when it has drifted from what is installed.
 `mc mrpack` builds an importable Modrinth pack for your players, and writes its
 `modrinth.index.json` out beside it for the same reason.
+
+Every build is diffed against the one before it. `client-install/mods/` has no
+memory — once a jar is swapped, what the previous pack held is unknowable — so
+`mc mrpack` records the mod set it just shipped and writes what changed into
+`client-install/CHANGELOG.md`, newest first. A mod that was merely updated
+would otherwise show up as one removal and one addition, because the version is
+in the filename and nothing else separates the two; the two halves are paired
+back up by name, and only when the pairing is unambiguous.
+
+That diff is also what decides whether there is anything to do. The mods folder
+*is* the pack, so what a build would contain is knowable before spending a
+minute resolving and zipping it: a run that would produce the mod set already
+released builds nothing, writes nothing and announces nothing. `--force` builds
+anyway, which is what to reach for when the pack file is missing rather than
+out of date.
+
+A build that *did* change something is announced in the Discord channel
+`mc notify` already uses — the changelog in the message, the `.mrpack` and its
+manifest attached. Announcing is a side effect of releasing, not a flag: an
+unconfigured server stays quiet, and a Discord that is down or misconfigured is
+reported without failing the build, because the pack and the history were
+written either way and the fix is to post again rather than to build again. A
+pack over Discord's upload limit is announced without the file rather than
+silently failing.
 
 ## What a snapshot covers
 
@@ -305,6 +329,8 @@ Nothing it cannot rebuild, and nothing it does not announce:
 | `backups/` | the restic repository and the password that unlocks it |
 | `fetch-mods/` | staged jar downloads, and the jars `install` swapped out |
 | `logs/gc.log` | written by the JVM flags `mc start` sets |
+| `client-install/pack-history.json` | the client pack's mod set and every release as a diff |
+| `client-install/CHANGELOG.md` | the same history rendered to read, newest first |
 
 The shipped `.gitignore` excludes all of it, along with everything else a
 Minecraft server leaves lying around. It is an allowlist: it ignores the whole
