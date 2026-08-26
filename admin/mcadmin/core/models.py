@@ -23,6 +23,9 @@ DEFAULT_SERVER_DIR = Path(__file__).resolve().parents[3]
 # INCLUDES in core.repository -- so the repository never tries to snapshot itself.
 DEFAULT_BACKUP_DIR = DEFAULT_SERVER_DIR / "backups"
 SESSION_NAME = "minecraft"
+# The listener runs in its own session: it outlives every server start and
+# stop, so it must not share the one that dies with the supervisor.
+LISTENER_SESSION = "bastion-bot"
 # fabric-server-mc.26.2-loader.0.19.3-launcher.1.1.2.jar
 JAR_VERSION_RE = re.compile(r"mc\.(?P<minecraft>[\d.]+?)-loader\.(?P<loader>[\d.]+?)-")
 
@@ -88,6 +91,21 @@ class Paths(BaseModel):
     @property
     def runtime_file(self) -> Path:
         return self.admin_dir / ".runtime.json"
+
+    @property
+    def listener_file(self) -> Path:
+        """Published by `mc listen` while it runs; meaningless once it exits."""
+        return self.admin_dir / ".listener.json"
+
+    @property
+    def notify_config(self) -> Path:
+        """Bot token and channel id for Discord notifications.
+
+        A credential, so it is gitignored by name and never read from anywhere
+        a snapshot or a clone would carry it. Absent means notifications are
+        simply off.
+        """
+        return self.admin_dir / ".notify.json"
 
     @property
     def mods_dir(self) -> Path:

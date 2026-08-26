@@ -12,20 +12,41 @@ import pytest
 
 from mcadmin.core import supervisor as sup
 from mcadmin.core.models import JvmOptions, Paths, RuntimeState
+from mcadmin.core.notify import EventKind, Notice
 from mcadmin.core.rcon import RconError
 
 
 class FakeJvm(sup.Supervisor):
-    """A supervisor whose 'JVM' is a sleep of a chosen duration."""
+    """A supervisor whose 'JVM' is a sleep of a chosen duration.
 
-    def __init__(self, *args, lifetime: str = "0.05", **kwargs) -> None:
+    `exit_code` makes that sleep exit dirty instead of clean, which is the only
+    thing separating a crash from an intentional restart further up.
+    """
+
+    def __init__(self, *args, lifetime: str = "0.05", exit_code: int = 0, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.lifetime = lifetime
+        self.exit_code = exit_code
         self.launches = 0
 
     def _launch(self) -> subprocess.Popen:
         self.launches += 1
+        if self.exit_code:
+            return subprocess.Popen(["sh", "-c", f"sleep {self.lifetime}; exit {self.exit_code}"])
         return subprocess.Popen(["sleep", self.lifetime])
+
+
+class FakeRcon:
+    """A server that answers `list`, the way a booted one does."""
+
+    def command(self, _text: str) -> str:
+        return "There are 0 of a max of 20 players online:"
+
+    def __enter__(self) -> "FakeRcon":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
 
 
 @pytest.fixture(autouse=True)
@@ -39,6 +60,10 @@ def isolated(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sup, "connect", no_rcon)
     monkeypatch.setattr(sup, "POLL_INTERVAL", 0.01)
+    # The supervisor builds a notifier from the environment when given none;
+    # a developer with a token exported must not make these tests post to it.
+    monkeypatch.delenv("MC_DISCORD_TOKEN", raising=False)
+    monkeypatch.delenv("MC_DISCORD_CHANNEL", raising=False)
     handlers = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)}
     yield tmp_path
     for number, handler in handlers.items():
@@ -111,3 +136,91 @@ def test_request_shutdown_is_idempotent(paths):
     supervisor.request_shutdown()
     supervisor.request_shutdown()
     assert supervisor._shutdown.is_set()
+
+
+# ------------------------------------------------------------ notifications
+
+
+class Recorder:
+    """A notifier that remembers, so a test can assert on the events raised."""
+
+    def __init__(self) -> None:
+        self.notices: list[Notice] = []
+
+    def send(self, notice: Notice) -> None:
+        self.notices.append(notice)
+
+    @property
+    def kinds(self) -> list[EventKind]:
+        return [notice.kind for notice in self.notices]
+
+
+def test_a_requested_stop_announces_a_stop(paths):
+    recorder = Recorder()
+    supervisor = FakeJvm(paths, JvmOptions(), lifetime="30", notifier=recorder)
+    threading.Timer(0.2, supervisor.request_shutdown).start()
+    supervisor.run()
+    assert recorder.kinds == [EventKind.STARTING, EventKind.STOPPED]
+
+
+def test_a_crash_is_announced_before_the_restart(paths):
+    recorder = Recorder()
+    supervisor = FakeJvm(
+        paths, JvmOptions(), exit_code=1, restart_delay=0.01, notifier=recorder
+    )
+    supervisor.run()
+    assert EventKind.CRASHED in recorder.kinds
+    assert EventKind.RESTARTING not in recorder.kinds
+
+
+def test_a_clean_exit_the_supervisor_did_not_ask_for_reads_as_a_restart(paths):
+    """This is `mc restart`: it stops the JVM and leaves the supervisor alone,
+    so the loop sees a clean exit it never requested and brings the server
+    back. Announcing that as a crash would cry wolf on every restart."""
+    recorder = Recorder()
+    supervisor = FakeJvm(paths, JvmOptions(), restart_delay=0.01, notifier=recorder)
+    supervisor.run()
+    assert EventKind.RESTARTING in recorder.kinds
+    assert EventKind.CRASHED not in recorder.kinds
+
+
+def test_the_crash_loop_guard_announces_giving_up(paths):
+    recorder = Recorder()
+    supervisor = FakeJvm(
+        paths, JvmOptions(), restart_delay=0.01, max_rapid_restarts=2, notifier=recorder
+    )
+    supervisor.run()
+    assert recorder.kinds[-1] is EventKind.ABANDONED
+    assert recorder.kinds.count(EventKind.STARTING) == 2
+
+
+def test_the_server_is_announced_as_up_once_it_answers_rcon(paths, monkeypatch):
+    """The JVM being alive is not the same as the server being playable."""
+    monkeypatch.setattr(sup, "READY_POLL", 0.01)
+    monkeypatch.setattr(sup, "connect", lambda **_: FakeRcon())
+    recorder = Recorder()
+    supervisor = FakeJvm(paths, JvmOptions(), lifetime="30", notifier=recorder)
+    threading.Timer(0.4, supervisor.request_shutdown).start()
+    supervisor.run()
+    assert EventKind.READY in recorder.kinds
+
+
+def test_a_notifier_that_raises_never_breaks_the_loop(paths):
+    """Discord being down must not be able to stop the server from running."""
+
+    class Broken:
+        def send(self, notice: Notice) -> None:
+            raise RuntimeError("discord is on fire")
+
+    supervisor = FakeJvm(paths, JvmOptions(), lifetime="30", notifier=Broken())
+    threading.Timer(0.2, supervisor.request_shutdown).start()
+    supervisor.run()  # the exit code is the JVM's; what matters is reaching here
+    assert supervisor.launches == 1
+
+
+def test_an_unconfigured_server_still_supervises(paths):
+    """No config file in `paths`, so the default notifier is the null one."""
+    supervisor = FakeJvm(paths, JvmOptions(), lifetime="30")
+    threading.Timer(0.2, supervisor.request_shutdown).start()
+    supervisor.run()
+    assert supervisor.launches == 1

@@ -35,6 +35,13 @@ dist/
 # Published by the supervisor while the server runs; meaningless once it exits.
 admin/.runtime.json
 
+# Published by the Discord listener while it runs; same deal.
+admin/.listener.json
+
+# The Discord bot token and channel id. A credential: anyone holding it can
+# post as the bot, so it never leaves this machine.
+admin/.notify.json
+
 # Log fingerprints and the metrics time series. Both are this server's
 # operating history: player names, session times, machine load.
 admin/*.db

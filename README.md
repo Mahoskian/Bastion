@@ -25,6 +25,7 @@ let them write their own configs. Bastion attaches to whatever is there. See
 |---|---|
 | OS | Linux |
 | Python | 3.12+, installed and run through [uv](https://docs.astral.sh/uv/) |
+| Discord | optional — `discord.py`, pulled in by `uv sync`, only used by `mc listen` |
 | `tmux` | the server runs inside a detached session |
 | `restic` | snapshots — `sudo apt install restic` |
 | Java | whatever your Minecraft version needs |
@@ -92,7 +93,69 @@ mc start [--heap 24G]     start supervised, in a detached tmux session
 mc stop / restart         stop takes the session down; restart keeps it
 mc console                attach to the live console
 mc rcon "<command>"       run console commands over RCON
+mc notify setup|test      broadcast lifecycle events to a Discord channel
+mc listen start|stop      run the Discord slash-command listener
 ```
+
+**Discord notifications.** `mc notify setup` stores a bot token and a channel
+id, and from then on the supervisor announces every lifecycle transition it
+sees: starting, up and answering RCON, restarting, stopped, crashed, and gave
+up after a crash loop. It reports the transitions rather than the commands, so
+a crash at 3am and an unattended restart are announced exactly like a stop you
+typed yourself.
+
+Notifications begin at the next **`mc start`**, not the next `mc restart`. A
+restart deliberately leaves the supervisor alone and lets its loop bring the
+JVM back, so a supervisor that was already running goes on running the code it
+started with — configure Discord while the server is up and you have to cycle
+the supervisor (`mc stop && mc start`) before it has a notifier in it. The same
+is true of any change to `supervisor.py`.
+
+**Slash commands.** `mc listen` runs a gateway client that answers four
+read-only commands in Discord:
+
+```
+/status                   server state, players, heap, key settings
+/players                  who is online right now
+/wrapped [player]         leaderboards, or one player's card
+/deaths                   hotspots, causes, and who dies most
+```
+
+```
+mc listen start           run it detached, in its own tmux session
+mc listen status          running? connected? to which server?
+mc listen console         attach to it (Ctrl-B then D to detach)
+mc listen stop            stop it and close the session
+```
+
+It is a daemon — the only one Bastion has besides the supervisor — and it is
+managed the same way the server is: a detached tmux session, a state file it
+publishes while it runs, and a stop that reads the real world rather than
+trusting the file.
+
+It is deliberately independent of the server's lifecycle: not started by
+`mc start`, not stopped by `mc stop`. Coupling them would put the bot offline
+exactly when the server is down, which is when you most want to ask. To have it
+survive a reboot, start it from cron:
+
+```cron
+@reboot  /path/to/admin/mc listen start
+```
+
+Commands are registered per server, so they appear the moment it connects
+rather than after the hour that global registration can take.
+
+Nothing here changes the server, so nothing checks a permission. Commands that
+do would need one — Discord's `default_member_permissions` hides a command from
+anyone lacking a permission, and **Server Settings → Integrations** then lets
+you retune it per role without a code change. Verify server-side too: those
+settings are a default the guild can override.
+
+Sending is a plain REST call with the bot token, so there is no gateway
+connection for notifications and no second process to keep alive — and no notification failure
+can delay a restart or take the supervisor down with it. Notifications are off
+until configured, and `mc notify test` checks the token and the channel before
+you rely on either.
 
 **Snapshots** — deduplicated, verifiable, restic-backed.
 
@@ -222,6 +285,8 @@ Nothing it cannot rebuild, and nothing it does not announce:
 | `admin/.runtime.json` | the supervisor's live state; meaningless once the JVM exits |
 | `admin/.metrics.db` | the metrics time series — outlives the GC logs, which rotate |
 | `admin/.log-baseline.db` | fingerprints of log entries already reported |
+| `admin/.notify.json` | the Discord bot token and channel id, mode 600, gitignored |
+| `admin/.listener.json` | the listener's live state; meaningless once it exits |
 | nothing else | `wrapped`, `deaths`, `chunks` and `why-slow` only read |
 | `backups/` | the restic repository and the password that unlocks it |
 | `fetch-mods/` | staged jar downloads, and the jars `install` swapped out |

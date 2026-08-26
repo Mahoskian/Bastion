@@ -163,12 +163,78 @@ Two details:
 Also fixed while here: `PackSpec` hard-coded `26.2` / `0.19.3`. Both now come
 from the launcher jar's filename via `Paths.versions()`.
 
-### 7. Push notifications on failure  [crash-loop guard DONE]
-`Supervisor` already refuses to restart after 3 crashes inside 60s each, so the
-restart-loop half of this is handled. What is still missing is anyone finding
-out: push to ntfy/Discord on crash, on OOM in the GC log, and on backup
-failure. `BackupJob` logs failures nobody reads, and cron now appends stderr to
-`backups/cron-errors.log` that nobody reads either.
+### 7. Push notifications  [lifecycle DONE]
+Implemented in `mcadmin/core/notify.py`, raised from `mcadmin/core/supervisor.py`.
+`mc notify setup` writes the token, `mc notify test` proves the path end to end,
+`mc notify status` says what is configured and from where.
+
+Six events, all from the supervisor: starting, up (once RCON answers),
+restarting, stopped, crashed, and gave up after the crash-loop guard trips.
+The supervisor is the emitter because it is the only thing that sees all of
+them — `mc stop` signals it, and `mc restart` deliberately leaves it alone and
+lets its loop bring the server back, so any notification attached to the CLI
+commands themselves would miss every unattended restart and every crash.
+
+Three things worth remembering:
+
+- **A bot does not need a gateway connection to send.** A bot token can POST to
+  `/channels/{id}/messages` directly. The websocket is for *receiving*, so
+  broadcast-only costs no dependency and no second daemon; chat relay or slash
+  commands would add it later without changing any of this.
+- **Exit code is the only thing separating a restart from a crash.** By the
+  time the loop sees the JVM gone, an intentional `mc restart` and a crash look
+  identical — except that a JVM told to stop shuts down cleanly and exits 0.
+  Announcing every exit as a crash would cry wolf on every restart.
+- **"The JVM is alive" is not "the server is up".** This mod set spends over a
+  minute between the two, and *up* is the message anyone waiting to play wants.
+  A side thread polls RCON and announces the boot time; it stays off the main
+  loop so that watching for readiness cannot delay noticing a crash mid-boot.
+
+One thing found by running it against a real bot: **`/users/@me/guilds` is
+rate-limited far harder than sending is.** A first version checked guild
+membership on every `mc notify test` to give a better error, and the check
+itself started returning 429 -- so the diagnosis is now only asked for once a
+403 has already happened. It is worth asking then, because an uninvited bot
+authenticates perfectly and 403s on every channel in existence, which reads
+exactly like a channel-permission problem and is not one.
+
+### 7b. Slash commands  [read-only DONE]
+`mc listen` (`mcadmin/cli/listen.py`, embeds in `mcadmin/ui/discord.py`) answers
+`/status`, `/players`, `/wrapped [player]` and `/deaths` over the gateway.
+
+- **The gateway, not an interactions endpoint URL.** Both receive commands; the
+  gateway is an outbound websocket, so nothing on the box running the world has
+  to be reachable from the internet. The endpoint URL would have meant inbound
+  HTTPS, a signature check on every request, and a reply inside 3 seconds.
+- **A daemon, and deliberately not the supervisor's.** Folding it into the
+  supervisor would have been free — that process is already long-lived — and
+  would have made commands work only while the server was up. The answer you
+  most want from a phone is about a server that is down. It gets its own tmux
+  session and its own state file for the same reason, and `mc listen
+  start/stop/status/console` mirrors `mc start/stop/status/console` rather than
+  inventing a second way to manage a process.
+- **No intents.** Interactions need none. Reading chat for `!status` would have
+  needed the privileged Message Content intent, and given up autocomplete,
+  argument validation and Discord's own permission integration to get it.
+- **Every command defers.** `/deaths` parses every log file; `/wrapped` walks
+  the stats directory. Both are slower than Discord's 3-second acknowledgement
+  window, so all four defer and edit the answer in, and `core` is called
+  through `asyncio.to_thread` so a slow answer cannot stall the heartbeat.
+
+`/wrapped` and `/deaths` report different death counts for the same player and
+both are right: stats files are cumulative, while the death map can only see
+the logs that have not rotated away. Same shape as the two playtime figures in
+item 8.
+
+Still open: the privileged half. `/restart`, `/stop` and `/snapshot now` need
+`default_member_permissions` on the command *and* a server-side check of the
+invoking member's roles, because the guild's Integrations settings can override
+the default. Nothing destructive should ship on the client's word.
+
+Still missing: OOM in the GC log, and backup failure. `BackupJob` logs failures
+nobody reads, and cron appends stderr to `backups/cron-errors.log` that nobody
+reads either. Both now have somewhere to go — they need a caller, not a
+transport.
 
 ## Tier 2 -- fun
 

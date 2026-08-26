@@ -4,6 +4,19 @@
 of its own: every command reads the server's real state — process table, tmux
 session, RCON socket, log files — decides something, and exits.
 
+Two commands are the exception, and both are exceptions for the same reason —
+something outside has to be *waited on*. `mc supervise` owns the JVM for as
+long as it runs. `mc listen run` holds a websocket open so Discord can send
+slash commands in. Both are launched detached into a tmux session by a command
+that then exits (`mc start`, `mc listen start`), both publish a state file while
+they run, and both are stopped by signalling the process rather than by deleting
+that file. Everything else still reads state and exits.
+
+The two daemons are independent. `listener.py` mirrors `controller.py` rather
+than joining it, and the listener has a session name of its own, because tying
+the bot to the server's lifecycle would take it offline at the moment a
+question about the server is most worth asking.
+
 ## The three layers
 
 ```
@@ -39,6 +52,44 @@ wrappers over the two OS facts the tool depends on. `supervisor.py` launches
 the JVM and restarts it when it dies; `controller.py` is the object every
 lifecycle command drives. `rcon.py` speaks the Source RCON protocol, and
 `properties.py` reads `server.properties` as typed values.
+
+**Notifications** — `notify.py` posts lifecycle events to Discord as a bot,
+over REST rather than a gateway connection: sending needs only an HTTPS POST,
+and the websocket exists to *receive*, which nothing here does. The events are
+raised from `supervisor.py` because it is the only process that witnesses every
+transition — `mc stop` signals it and `mc restart` deliberately bypasses it, so
+a notification hung off either command would miss every unattended restart and
+every crash. An unconfigured server gets a `NullNotifier`, a broken config
+warns and degrades to one, and every send is wrapped: Discord must never be
+able to delay a restart.
+
+One consequence of that split is worth stating: the supervisor outlives every
+`mc restart`, so a change to `supervisor.py` — or to anything it holds, like
+the notifier — does not take effect until the supervisor process itself is
+cycled with `mc stop && mc start`. A restart re-launches the JVM, not the
+Python.
+
+**Discord** — `notify.py` speaks out, `cli/listen.py` listens in, and they share
+only the config file and the bot identity. Listening is a gateway websocket
+because it is outbound: nothing on the box hosting the world becomes reachable
+from the internet, which an interactions endpoint URL would have required.
+`ui/discord.py` renders core's models as embeds under the same rule as the rest
+of `ui` — a pure function of a model — and returns plain dicts rather than
+`discord.Embed` objects, so it stays testable without discord.py installed.
+
+`listener.py` is the lifecycle half: start, stop and a `ListenerState` that
+distinguishes *started* from *connected*, since the process is up for a moment
+before the gateway handshake finishes and again whenever it is resuming. It
+does not restart on crash the way the supervisor does — discord.py reconnects
+and resumes on its own, so the failure that loop would catch is handled a layer
+down.
+
+The listener is the one place where a `cli` module is not thin, because a slash
+command *is* a command line: it parses arguments, calls `core`, and hands the
+result to `ui`. The two things Discord adds are that `core` is called through
+`asyncio.to_thread`, so a slow answer cannot stall the heartbeat and drop the
+connection, and that every command defers its reply — Discord wants an
+acknowledgement within three seconds, and a cold `/wrapped` is slower than that.
 
 **Snapshots** — `repository.py` wraps restic. Content-defined chunking is why
 an hourly snapshot of a multi-gigabyte world costs megabytes; the module's job
@@ -96,6 +147,12 @@ The server directory is derived from this file's own location, with
 
 **Bytes are verified before they land.** Downloads are checked against sha512
 then sha1 before anything is written; a mismatch never reaches disk.
+
+**Credentials live outside the tree, and are never optional-by-silence.** The
+Discord bot token sits in `admin/.notify.json` at mode 600, ignored by name.
+An absent config means notifications are off, which is not an error — but a
+config that exists and does not parse *is* one, because silently reading a
+typo as "off" is how a server notifies nobody for a month unnoticed.
 
 **Missing evidence is not evidence.** Several reports draw on logs that rotate
 away. When the data for a window is simply gone, the report says so rather than

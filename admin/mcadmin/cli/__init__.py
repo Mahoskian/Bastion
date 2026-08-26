@@ -17,10 +17,12 @@ from . import (
     deaths,
     dev,
     gc,
+    listen,
     logs,
     metrics,
     mods,
     mrpack,
+    notify,
     server,
     slow,
     snapshot,
@@ -37,7 +39,7 @@ from . import (
 # far too often to become `mc server start`, so the panels do the sorting a
 # name hierarchy would otherwise have to.
 LAYOUT: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Server", ("status", "start", "stop", "restart", "console", "rcon")),
+    ("Server", ("status", "start", "stop", "restart", "console", "rcon", "notify", "listen")),
     ("Snapshots", ("snapshot",)),
     ("Performance and health", ("logs", "metrics", "gc", "why-slow", "chunks")),
     ("For the players", ("wrapped", "deaths")),
@@ -70,6 +72,8 @@ app.add_typer(snapshot.app, name="snapshot")
 app.add_typer(logs.app, name="logs")
 app.add_typer(metrics.app, name="metrics")
 app.add_typer(mods.app, name="mods")
+app.add_typer(notify.app, name="notify")
+app.add_typer(listen.app, name="listen")
 for module in (server, gc, mrpack, stats, deaths, chunks, slow, dev):
     app.registered_commands.extend(module.app.registered_commands)
 

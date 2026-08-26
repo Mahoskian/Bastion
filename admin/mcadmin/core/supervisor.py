@@ -18,6 +18,7 @@ from datetime import datetime
 from types import FrameType
 
 from .models import JvmOptions, Paths, RuntimeState
+from .notify import Notice, Notifier, notifier_for
 from .rcon import RconError, connect
 
 POLL_INTERVAL = 0.5
@@ -28,6 +29,11 @@ RESTART_DELAY = 10.0
 # A JVM that dies faster than this never really came up.
 MIN_HEALTHY_SECONDS = 60.0
 MAX_RAPID_RESTARTS = 3
+# How long to keep asking a booting server whether it is up yet. Modded boots
+# run to ~90s here; the ceiling is only there so the watcher cannot outlive a
+# server that came up broken and never opened its RCON port.
+READY_TIMEOUT = 600.0
+READY_POLL = 5.0
 
 
 class Supervisor:
@@ -39,11 +45,13 @@ class Supervisor:
         jvm: JvmOptions,
         restart_delay: float = RESTART_DELAY,
         max_rapid_restarts: int = MAX_RAPID_RESTARTS,
+        notifier: Notifier | None = None,
     ) -> None:
         self.paths = paths
         self.jvm = jvm
         self.restart_delay = restart_delay
         self.max_rapid_restarts = max_rapid_restarts
+        self.notifier = notifier or notifier_for(paths, self._say)
         self._shutdown = threading.Event()
         self._process: subprocess.Popen[bytes] | None = None
         self._restarts = 0
@@ -52,6 +60,50 @@ class Supervisor:
 
     def _say(self, message: str) -> None:
         print(f"[mc] {datetime.now():%H:%M:%S} {message}", flush=True)
+
+    # ------------------------------------------------------------- notifying
+
+    def _notify(self, notice: Notice) -> None:
+        """Announce something, and never let announcing it matter.
+
+        A Discord outage, an expired token or a slow network must not delay a
+        restart or take the supervisor down with it, so every failure here is
+        logged and dropped -- including ones a notifier is not supposed to
+        raise in the first place.
+        """
+        try:
+            self.notifier.send(notice)
+        except Exception as exc:  # noqa: BLE001 -- deliberate; see the docstring
+            self._say(f"could not send the {notice.kind} notification: {exc}")
+
+    def _rcon_ready(self) -> bool:
+        try:
+            with connect(timeout=3.0) as client:
+                return "players" in client.command("list").lower()
+        except (RconError, OSError):
+            return False
+
+    def _watch_for_ready(self, process: subprocess.Popen[bytes], since: float) -> None:
+        """Announce the server as up once it answers RCON, from a side thread.
+
+        The JVM being alive is not the same as the server being playable --
+        this mod set spends over a minute between the two -- and "up" is the
+        message anyone waiting to play actually wants. It runs beside the loop
+        rather than in it because the loop's job is watching the process, and
+        blocking it here would delay noticing a crash during boot.
+        """
+
+        def watch() -> None:
+            deadline = time.monotonic() + READY_TIMEOUT
+            while time.monotonic() < deadline:
+                if self._shutdown.is_set() or process.poll() is not None:
+                    return
+                if self._rcon_ready():
+                    self._notify(Notice.ready(time.monotonic() - since))
+                    return
+                time.sleep(READY_POLL)
+
+        threading.Thread(target=watch, name="ready-watcher", daemon=True).start()
 
     # ------------------------------------------------------------- signals
 
@@ -122,6 +174,8 @@ class Supervisor:
         process = self._launch()
         self._process = process
         self._publish(process.pid)
+        self._notify(Notice.starting(self.jvm.heap, self._restarts))
+        self._watch_for_ready(process, time.monotonic())
         stop_sent = False
         while process.poll() is None:
             if self._shutdown.is_set() and not stop_sent:
@@ -145,6 +199,7 @@ class Supervisor:
 
                 if self._shutdown.is_set():
                     self._say("stop was requested -- not restarting.")
+                    self._notify(Notice.stopped(lasted))
                     break
 
                 rapid = rapid + 1 if lasted < MIN_HEALTHY_SECONDS else 0
@@ -153,8 +208,10 @@ class Supervisor:
                         f"[ERROR] {rapid} crashes in under {MIN_HEALTHY_SECONDS:.0f}s each -- "
                         "giving up rather than restart-looping. Check logs/latest.log."
                     )
+                    self._notify(Notice.abandoned(rapid, MIN_HEALTHY_SECONDS))
                     break
 
+                self._notify(Notice.exited(code, lasted, self.restart_delay))
                 self._restarts += 1
                 self._say(f"restarting in {self.restart_delay:.0f}s (Ctrl-C to stay stopped)")
                 if self._shutdown.wait(self.restart_delay):

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import sys
 from collections.abc import Callable, Iterator
@@ -33,6 +34,39 @@ RESTART_TIMEOUT = 420.0
 
 class LifecycleError(RuntimeError):
     """Something the user needs to resolve before the action can proceed."""
+
+
+# "There are 2 of a max of 12 players online: Alice, Bob"
+LIST_RE = re.compile(
+    r"there are (?P<online>\d+) of a max of (?P<maximum>\d+) players online:?(?P<names>.*)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+@dataclass(frozen=True)
+class Online:
+    """Who is on, parsed out of RCON's `list` sentence."""
+
+    online: int
+    maximum: int
+    names: tuple[str, ...] = ()
+
+    @classmethod
+    def parse(cls, reply: str | None) -> Online | None:
+        """None when the reply is not the sentence this knows how to read.
+
+        Mods do rewrite this line, and a caller that cannot parse it still has
+        the raw text to show -- so failing to parse must stay distinguishable
+        from an empty server, which is what returning None keeps true.
+        """
+        if not reply:
+            return None
+        match = LIST_RE.search(reply.strip())
+        if match is None:
+            return None
+        listed = match["names"].strip()
+        names = tuple(name.strip() for name in listed.split(",") if name.strip())
+        return cls(online=int(match["online"]), maximum=int(match["maximum"]), names=names)
 
 
 @dataclass(frozen=True)
