@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from rich.panel import Panel
 
-from ..core.controller import Status
+from ..core.controller import Status, Tick
 from ..core.models import ServerState
 from ..core.properties import ServerProperties
 from .console import console, rows
@@ -41,6 +41,10 @@ def show_status(status: Status, props: ServerProperties) -> None:
         console.print()
 
     rows(props.notable())
+    tick = Tick.parse(status.tick)
+    if tick is not None:
+        console.print()
+        rows({"tick": tick.summary})
     if status.players:
         console.print()
         rows({"players": status.players})

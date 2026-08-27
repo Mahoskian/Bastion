@@ -16,9 +16,10 @@ import threading
 import time
 from datetime import datetime
 from types import FrameType
+from typing import NamedTuple
 
-from .board import Board, Phase, Pinboard, pinboard_for, restart_at
-from .controller import Online
+from .board import Board, Phase, Pinboard, pinboard_for, restart_at, version_label
+from .controller import Online, Tick
 from .models import JvmOptions, Paths, RuntimeState
 from .notify import Notice, Notifier, notifier_for
 from .rcon import RconError, connect
@@ -36,6 +37,26 @@ MAX_RAPID_RESTARTS = 3
 # server that came up broken and never opened its RCON port.
 READY_TIMEOUT = 600.0
 READY_POLL = 5.0
+# How often a running board is rewritten with a fresh roster and tick rate.
+# The lifecycle transitions this used to update on are minutes to days apart,
+# which left a pinned message reading "0/12" at people who were standing in
+# the world at the time. One edit a minute is nothing against Discord's rate
+# limits and nothing against the server -- it is two RCON round trips.
+BOARD_REFRESH = 60.0
+
+
+class Live(NamedTuple):
+    """What one RCON visit says about a running server.
+
+    `reply` is kept raw beside the parsed roster because readiness is decided
+    on it: a mod that rewrites the `list` line would fail to parse while the
+    server is perfectly up, and treating that as "not ready yet" would hang
+    the board on Booting for the whole run.
+    """
+
+    reply: str
+    players: Online | None
+    tick: Tick | None
 
 
 class Supervisor:
@@ -60,6 +81,13 @@ class Supervisor:
         self._process: subprocess.Popen[bytes] | None = None
         self._restarts = 0
         self._started_at = datetime.now()
+        # The board as last shown, and the lock that keeps the refresher from
+        # writing a stale copy of it over a transition that overtook it.
+        self._board: Board | None = None
+        self._board_lock = threading.Lock()
+        self._board_failing = False
+        # Read once: the jar cannot change under a running supervisor.
+        self._version = version_label(paths)
 
     # ------------------------------------------------------------- output
 
@@ -87,7 +115,7 @@ class Supervisor:
     def _show(self, phase: Phase, **fields: object) -> None:
         """Move the pinned status board to a phase, swallowing any failure.
 
-        Heap and restart count are filled in here rather than at each call
+        Version and restart count are filled in here rather than at each call
         site: they are true of the supervisor, not of the transition, and a
         board that dropped them halfway through a run would look like the
         server had changed shape.
@@ -97,27 +125,46 @@ class Supervisor:
         fields.setdefault("since", datetime.now())
         board = Board(
             phase=phase,
-            heap=self.jvm.heap,
             restarts=self._restarts,
+            version=self._version,
             **fields,  # type: ignore[arg-type]
         )
+        with self._board_lock:
+            self._board = board
+            self._write(board)
+
+    def _write(self, board: Board, quiet: bool = False) -> None:
+        """Put a board on Discord. Called under the lock, and never raises.
+
+        `quiet` is for the refresher: a Discord outage lasting an hour would
+        otherwise print sixty identical lines into the pane the server console
+        lives in, so a repeat of a failure already reported stays silent until
+        something changes.
+        """
         try:
             self.pinboard.show(board)
         except Exception as exc:  # noqa: BLE001 -- deliberate; as above
-            self._say(f"could not update the status board to {phase}: {exc}")
+            if not (quiet and self._board_failing):
+                self._say(f"could not update the status board to {board.phase}: {exc}")
+            self._board_failing = True
+        else:
+            self._board_failing = False
 
-    def _list(self) -> str | None:
-        """RCON's answer to `list`, or None while the server cannot give one.
+    def _probe(self) -> Live | None:
+        """Ask the server how it is doing, or None while it cannot say.
 
-        Answering this at all is what "ready" means here, and the answer also
+        Answering `list` at all is what "ready" means here, and the answer also
         happens to name everyone online -- so the board's player count costs
         nothing beyond the round trip the readiness check was making anyway.
+        `tick query` rides along on the same connection for the same reason.
         """
         try:
             with connect(timeout=3.0) as client:
-                return client.command("list")
+                reply = client.command("list")
+                ticking = client.command("tick query")
         except (RconError, OSError):
             return None
+        return Live(reply, Online.parse(reply), Tick.parse(ticking))
 
     def _watch_for_ready(self, process: subprocess.Popen[bytes]) -> None:
         """Move the board to Running once RCON answers, from a side thread.
@@ -134,18 +181,66 @@ class Supervisor:
             while time.monotonic() < deadline:
                 if self._shutdown.is_set() or process.poll() is not None:
                     return
-                reply = self._list()
-                if reply is not None and "players" in reply.lower():
+                live = self._probe()
+                if live is not None and "players" in live.reply.lower():
                     # `since` is the launch, not this moment: what a reader
                     # wants from "up since" is how long the server has been
                     # there, not how long ago it finished booting.
                     self._show(
-                        Phase.RUNNING, since=self._started_at, players=Online.parse(reply)
+                        Phase.RUNNING,
+                        since=self._started_at,
+                        players=live.players,
+                        tick=live.tick,
                     )
                     return
                 time.sleep(READY_POLL)
 
         threading.Thread(target=watch, name="ready-watcher", daemon=True).start()
+
+    def _refresh_board(self) -> None:
+        """Keep the running board current, for the life of the supervisor.
+
+        The board used to be written only when the phase changed, which is
+        exactly wrong for the half of it that is not a phase: a roster taken at
+        the moment the server finished booting says "nobody" for as long as the
+        server stays up, however many people join afterwards.
+
+        Only a Running board is refreshed. Booting has nothing to ask the
+        server for yet, and the rest are already told in client-rendered
+        relative time -- a countdown to a restart keeps counting down on its
+        own, and rewriting it every minute would buy nothing.
+
+        Runs for the whole supervisor rather than per JVM, so a restart in the
+        middle of it is just a board that goes Restarting, then Running again.
+        """
+        while not self._shutdown.wait(BOARD_REFRESH):
+            # Checked before the round trip as well as under the lock: there is
+            # no reason to talk to RCON while the board is not showing Running.
+            board = self._board
+            if board is None or board.phase is not Phase.RUNNING:
+                continue
+            live = self._probe()
+            if live is None:
+                # A server that has stopped answering is not something this can
+                # report on -- BOOTING would be a lie and CRASHED is the loop's
+                # to declare. Leave the board alone; its timestamp will age.
+                continue
+            with self._board_lock:
+                # The phase is re-read here because the probe above took time,
+                # and a crash during it would already have written the board.
+                # Without this the refresher would put Running back over it and
+                # then keep it there, since the copy it writes is Running too.
+                if self._board is not board:
+                    continue
+                fresh = board.model_copy(
+                    update={
+                        "players": live.players,
+                        "tick": live.tick,
+                        "updated": datetime.now(),
+                    }
+                )
+                self._board = fresh
+                self._write(fresh, quiet=True)
 
     # ------------------------------------------------------------- signals
 
@@ -231,6 +326,9 @@ class Supervisor:
 
     def run(self) -> int:
         self._install_handlers()
+        threading.Thread(
+            target=self._refresh_board, name="board-refresher", daemon=True
+        ).start()
         rapid = 0
         code = 0
         try:

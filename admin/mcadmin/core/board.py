@@ -33,7 +33,7 @@ from typing import NamedTuple, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .controller import Online, Status
+from .controller import Online, Status, Tick
 from .models import Paths, ServerState
 from .notify import DiscordBot, DiscordConfig, NotifyError
 
@@ -118,11 +118,16 @@ class Board(BaseModel):
     since: datetime | None = None
     updated: datetime = Field(default_factory=datetime.now)
     detail: str | None = None
-    heap: str | None = None
     restarts: int = 0
-    # A snapshot from the moment of the transition, not a live count. The
-    # footer's timestamp is what keeps that honest.
+    # Both re-read on every refresh, which is what the refresh is for: a
+    # roster and a tick rate are the two things about a running server that
+    # are different a minute later. The footer's timestamp says how old they
+    # are, so a stalled supervisor shows as a board that stopped ageing.
     players: Online | None = None
+    tick: Tick | None = None
+    # What to connect with. Static for the life of a jar, and the one thing
+    # somebody reading a pinned status message may actually need to look up.
+    version: str | None = None
     resumes_at: datetime | None = None
 
     @property
@@ -130,7 +135,13 @@ class Board(BaseModel):
         return PRESENTATION[self.phase]
 
     @classmethod
-    def observed(cls, status: Status, online: Online | None = None) -> Board:
+    def observed(
+        cls,
+        status: Status,
+        online: Online | None = None,
+        tick: Tick | None = None,
+        version: str | None = None,
+    ) -> Board:
         """The board as anything outside the supervisor can see it.
 
         Used by `mc notify board` to repair a message that went stale -- after
@@ -148,9 +159,10 @@ class Board(BaseModel):
         return cls(
             phase=phase,
             since=runtime.started_at if runtime else None,
-            heap=runtime.heap if runtime else None,
             restarts=runtime.restarts if runtime else 0,
             players=online,
+            tick=tick,
+            version=version,
             detail=(
                 "The tmux session is still open with no server in it."
                 if status.state is ServerState.ORPHANED
@@ -178,15 +190,23 @@ class Board(BaseModel):
                     "inline": False,
                 }
             )
-        if self.heap:
-            fields.append({"name": "Heap", "value": self.heap, "inline": True})
+        if self.tick is not None:
+            fields.append({"name": "Tick", "value": self.tick.summary, "inline": True})
         if self.restarts:
             fields.append({"name": "Restarts", "value": str(self.restarts), "inline": True})
+        if self.version:
+            fields.append({"name": "Version", "value": self.version, "inline": True})
 
         embed: dict[str, object] = {
             "title": f"{look.dot} Server Status: {look.label}",
             "color": look.colour,
-            "footer": {"text": f"updated {self.updated:%Y-%m-%d %H:%M}"},
+            "footer": {"text": "Updated"},
+            # Discord's own timestamp field rather than a formatted string in
+            # the footer: it renders in the reader's timezone, where the string
+            # rendered in this box's. It reads as "Today at 14:02" -- the one
+            # thing here that is deliberately absolute, since it is what tells
+            # a reader whether the numbers above it are a minute or a day old.
+            "timestamp": self.updated.astimezone().isoformat(),
         }
         if lines:
             embed["description"] = "\n".join(lines)
@@ -298,6 +318,20 @@ def pinboard_for(
     if config is None or not config.enabled:
         return NullPinboard()
     return DiscordPinboard(DiscordBot(config), paths.board_file, warn)
+
+
+def version_label(paths: Paths) -> str | None:
+    """The versions a client needs, off the jar's name, or nothing at all.
+
+    Both writers of the board want this the same way round, and a board that
+    cannot read the jar is only missing a nicety -- so the failure is a None
+    rather than something either caller has to handle.
+    """
+    try:
+        minecraft, loader = paths.versions()
+    except (ValueError, OSError):
+        return None
+    return f"Minecraft {minecraft} \N{MIDDLE DOT} Fabric {loader}"
 
 
 def restart_at(delay: float) -> datetime:

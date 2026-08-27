@@ -17,7 +17,7 @@ from collections.abc import Sequence
 from datetime import datetime
 
 from ..core.changelog import Release
-from ..core.controller import Online, Status
+from ..core.controller import Online, Status, Tick
 from ..core.deaths import DeathMap, Hotspot
 from ..core.models import ServerState
 from ..core.mrpack import PackResult, PackSpec
@@ -110,6 +110,10 @@ def server_status(
         fields.append(_field(f"Players ({online.online}/{online.maximum})", listed, False))
     elif status.players:
         fields.append(_field("Players", status.players, False))
+
+    tick = Tick.parse(status.tick)
+    if tick is not None:
+        fields.append(_field("Tick", tick.summary))
 
     if status.runtime is not None:
         runtime = status.runtime

@@ -22,8 +22,9 @@ from mcadmin.core.board import (
     PinState,
     pinboard_for,
     stamp,
+    version_label,
 )
-from mcadmin.core.controller import Online, Status
+from mcadmin.core.controller import Online, Status, Tick
 from mcadmin.core.models import Paths, RuntimeState, ServerState
 from mcadmin.core.notify import DiscordConfig, NotifyError
 
@@ -77,7 +78,7 @@ def state_file(tmp_path):
 
 @pytest.fixture
 def running() -> Board:
-    return Board(phase=Phase.RUNNING, since=datetime.now(), heap="12G")
+    return Board(phase=Phase.RUNNING, since=datetime.now())
 
 
 # ----------------------------------------------------------------- rendering
@@ -117,6 +118,21 @@ def test_a_long_roster_is_trimmed_rather_than_refused():
 def test_an_empty_server_says_so_rather_than_showing_a_blank_field():
     board = Board(phase=Phase.RUNNING, players=Online(online=0, maximum=20))
     assert board.embed()["fields"][0]["value"] == "nobody"
+
+
+def test_the_tick_rate_is_shown_because_it_is_what_changes(running):
+    """The heap this used to show was a number somebody typed once. This is
+    the field that says whether the server is worth joining right now."""
+    board = running.model_copy(update={"tick": Tick(rate=20.0, mspt=4.7)})
+    field = next(f for f in board.embed()["fields"] if f["name"] == "Tick")
+    assert field["value"] == "20.0 TPS \N{MIDDLE DOT} 4.7 ms"
+
+
+def test_the_footer_time_is_a_field_discord_renders_not_a_string_we_format():
+    """A formatted time renders in this box's timezone, which is nobody's but
+    mine. Discord's own timestamp renders in the reader's."""
+    board = Board(phase=Phase.RUNNING, updated=datetime(2026, 8, 26, 12, 34))
+    assert board.embed()["timestamp"].startswith("2026-08-26T12:34")
 
 
 def test_a_board_with_nothing_to_add_has_no_fields():
@@ -168,8 +184,19 @@ def test_an_observed_board_takes_its_age_from_the_running_supervisor():
     )
     board = observed(ServerState.RUNNING, runtime)
     assert board.since == started
-    assert board.heap == "8G"
     assert board.restarts == 4
+
+
+def test_the_versions_to_connect_with_come_off_the_jar(tmp_path):
+    """A pinned status message is where somebody looks this up."""
+    (tmp_path / "fabric-server-mc.26.2-loader.0.19.3-launcher.1.1.2.jar").touch()
+    label = version_label(Paths(server_dir=tmp_path))
+    assert label == "Minecraft 26.2 \N{MIDDLE DOT} Fabric 0.19.3"
+
+
+def test_a_server_directory_with_no_jar_simply_says_nothing(tmp_path):
+    """The version is a nicety; failing to read it must not fail a board."""
+    assert version_label(Paths(server_dir=tmp_path)) is None
 
 
 # ----------------------------------------------------------------- publishing

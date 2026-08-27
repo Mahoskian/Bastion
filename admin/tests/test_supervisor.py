@@ -38,10 +38,21 @@ class FakeJvm(sup.Supervisor):
 
 
 class FakeRcon:
-    """A server that answers `list`, the way a booted one does."""
+    """A server that answers `list` and `tick query`, the way a booted one does.
 
-    def command(self, _text: str) -> str:
-        return "There are 0 of a max of 20 players online:"
+    The roster it gives out is a class attribute so a test can have somebody
+    join between one refresh and the next.
+    """
+
+    roster = "There are 0 of a max of 20 players online:"
+
+    def command(self, text: str) -> str:
+        if text == "tick query":
+            return (
+                "The game is running normallyTarget tick rate: 20.0 per second."
+                "Average time per tick: 4.7ms (Target: 50.0ms)"
+            )
+        return self.roster
 
     def __enter__(self) -> "FakeRcon":
         return self
@@ -135,6 +146,90 @@ def test_runtime_state_is_published_then_cleared(paths):
     assert seen[0].heap == "8G"
     assert seen[0].jvm_pid is not None
     assert not paths.runtime_file.exists(), "runtime state outlived the supervisor"
+
+
+# ------------------------------------------------------------------ the board
+
+
+class Pinned:
+    """A pinboard that keeps every board it was shown."""
+
+    def __init__(self) -> None:
+        self.shown: list[Board] = []
+
+    def show(self, board: Board) -> None:
+        self.shown.append(board)
+
+
+def test_the_running_board_is_rewritten_while_nothing_transitions(
+    paths, monkeypatch, answering_rcon
+):
+    """The bug this exists for: a roster taken when the server finished
+    booting said "nobody" for the rest of the run, however many people joined.
+    """
+    monkeypatch.setattr(sup, "BOARD_REFRESH", 0.05)
+    monkeypatch.setattr(FakeRcon, "roster", "There are 0 of a max of 20 players online:")
+    board = Pinned()
+    supervisor = FakeJvm(paths, JvmOptions(), lifetime="30", restart_delay=0.01, pinboard=board)
+
+    def somebody_joins() -> None:
+        FakeRcon.roster = "There are 1 of a max of 20 players online: Steve"
+
+    threading.Timer(0.2, somebody_joins).start()
+    threading.Timer(0.6, supervisor.request_shutdown).start()
+    try:
+        supervisor.run()
+    finally:
+        FakeRcon.roster = "There are 0 of a max of 20 players online:"
+
+    running = [shown for shown in board.shown if shown.phase is Phase.RUNNING]
+    assert len(running) > 2, "the board was only written on transitions"
+    assert running[-1].players.names == ("Steve",), "the roster never caught up"
+    assert running[-1].tick is not None, "the tick rate is read on the same visit"
+    assert supervisor.launches == 1, "refreshing must not disturb the loop"
+
+
+def test_a_refresh_never_overwrites_the_transition_that_overtook_it(paths, monkeypatch):
+    """The probe takes a round trip, and a crash during it writes the board
+    first. A refresh landing afterwards would put Running back -- and, since
+    the copy it writes is Running too, it would keep refreshing that lie for
+    the rest of the run."""
+    monkeypatch.setattr(sup, "BOARD_REFRESH", 0.01)
+    board = Pinned()
+    supervisor = FakeJvm(paths, JvmOptions(), pinboard=board)
+    supervisor._board = Board(phase=Phase.RUNNING)
+
+    def overtaken_probe() -> sup.Live:
+        # What a probe that lost the race looks like from the refresher: by
+        # the time it returns, the loop has already written the JVM's exit.
+        supervisor._show(Phase.CRASHED)
+        supervisor.request_shutdown()  # one pass is enough
+        return sup.Live("There are 0 of a max of 20 players online:", None, None)
+
+    monkeypatch.setattr(supervisor, "_probe", overtaken_probe)
+    supervisor._refresh_board()
+
+    assert board.shown[-1].phase is Phase.CRASHED, "a stale refresh won the race"
+
+
+def test_only_a_running_board_is_refreshed(paths, monkeypatch):
+    """Booting has nothing to ask the server for, and a restart's countdown is
+    rendered by the client -- so neither is worth an RCON round trip."""
+    monkeypatch.setattr(sup, "BOARD_REFRESH", 0.01)
+    supervisor = FakeJvm(paths, JvmOptions(), pinboard=Pinned())
+    supervisor._board = Board(phase=Phase.RESTARTING)
+    probes = 0
+
+    def counting_probe() -> None:
+        nonlocal probes
+        probes += 1
+        return None
+
+    monkeypatch.setattr(supervisor, "_probe", counting_probe)
+    threading.Timer(0.1, supervisor.request_shutdown).start()
+    supervisor._refresh_board()
+
+    assert probes == 0
 
 
 def test_stop_falls_back_to_sigterm_when_rcon_is_unavailable(paths):

@@ -69,6 +69,76 @@ class Online:
         return cls(online=int(match["online"]), maximum=int(match["maximum"]), names=names)
 
 
+# `tick query` answers in one run-on paragraph, sentences jammed together:
+#   "The game is running normallyTarget tick rate: 20.0 per second.
+#    Average time per tick: 4.7ms (Target: 50.0ms)Percentiles: P50: 4.0ms
+#    P95: 9.2ms P99: 11.0ms. Sample: 100"
+# so each number is found on its own rather than by splitting the reply up.
+TICK_RATE_RE = re.compile(r"target tick rate:\s*(?P<rate>[\d.]+) per second", re.IGNORECASE)
+TICK_MSPT_RE = re.compile(r"average time per tick:\s*(?P<mspt>[\d.]+)\s*ms", re.IGNORECASE)
+TICK_P99_RE = re.compile(r"p99:\s*(?P<p99>[\d.]+)\s*ms", re.IGNORECASE)
+TICK_NOTE_RE = re.compile(
+    r"the game is (?P<note>.*?)(?=target tick rate)", re.IGNORECASE | re.DOTALL
+)
+NORMAL = "running normally"
+
+
+@dataclass(frozen=True)
+class Tick:
+    """How hard the server is working, out of `tick query`.
+
+    Worth a slot on a status board in a way a heap size is not: the heap is a
+    number somebody typed once, whereas this is the one measurement that says
+    whether the server is pleasant to play on right now. `mspt` is what a tick
+    actually costs against its 50ms budget, so it degrades visibly long before
+    the tick rate itself starts to drop.
+    """
+
+    rate: float
+    mspt: float
+    p99: float | None = None
+    # Only when the game is doing something other than running normally --
+    # frozen or stepping under `/tick freeze`, which would otherwise read as a
+    # server that had suddenly become very fast.
+    note: str | None = None
+
+    @classmethod
+    def parse(cls, reply: str | None) -> Tick | None:
+        """None unless both numbers are there; half a reading is not a reading."""
+        if not reply:
+            return None
+        rate = TICK_RATE_RE.search(reply)
+        mspt = TICK_MSPT_RE.search(reply)
+        if rate is None or mspt is None:
+            return None
+        p99 = TICK_P99_RE.search(reply)
+        note = TICK_NOTE_RE.search(reply)
+        said = note["note"].strip().rstrip(".") if note else ""
+        return cls(
+            rate=float(rate["rate"]),
+            mspt=float(mspt["mspt"]),
+            p99=float(p99["p99"]) if p99 else None,
+            note=said if said and said.lower() != NORMAL else None,
+        )
+
+    @property
+    def tps(self) -> float:
+        """Ticks actually achieved: the target, until one tick overruns its slot.
+
+        A server only falls behind once a tick costs more than the 50ms it is
+        given, and past that point the rate is just how many of those fit in a
+        second -- which is why this is a floor on the target rather than a
+        separate number to read out of the reply.
+        """
+        return min(self.rate, 1000.0 / self.mspt) if self.mspt > 0 else self.rate
+
+    @property
+    def summary(self) -> str:
+        """Short enough for an inline embed field: "20.0 TPS \N{MIDDLE DOT} 4.7 ms"."""
+        measured = f"{self.tps:.1f} TPS \N{MIDDLE DOT} {self.mspt:.1f} ms"
+        return f"{measured} ({self.note})" if self.note else measured
+
+
 @dataclass(frozen=True)
 class Status:
     """A snapshot of everything `mc status` wants to show."""
@@ -78,6 +148,9 @@ class Status:
     session_exists: bool
     runtime: RuntimeState | None
     players: str | None
+    # Raw like `players`, and for the same reason: a reply this cannot parse
+    # is still worth showing, so parsing stays the caller's problem.
+    tick: str | None = None
 
     @property
     def supervised(self) -> bool:
@@ -123,14 +196,24 @@ class ServerController:
         except (RconError, OSError):
             return None
 
+    def tick(self) -> str | None:
+        """RCON's answer to `tick query`, or None if it cannot give one."""
+        try:
+            with connect(timeout=3.0) as client:
+                return client.command("tick query") or None
+        except (RconError, OSError):
+            return None
+
     def status(self) -> Status:
         state = self.state()
+        live = state is ServerState.RUNNING
         return Status(
             state=state,
             pid=process.server_pid(),
             session_exists=self.session.exists(),
             runtime=self.runtime(),
-            players=self.players() if state is ServerState.RUNNING else None,
+            players=self.players() if live else None,
+            tick=self.tick() if live else None,
         )
 
     # ------------------------------------------------------------- quiesce

@@ -8,8 +8,8 @@ import stat
 
 import typer
 
-from ..core.board import Board, DiscordPinboard, PinState
-from ..core.controller import Online, ServerController
+from ..core.board import Board, DiscordPinboard, PinState, version_label
+from ..core.controller import Online, ServerController, Tick
 from ..core.models import Paths
 from ..core.notify import ENV_CHANNEL, ENV_TOKEN, DiscordBot, DiscordConfig, Notice, NotifyError
 from ..ui import notify as view
@@ -120,7 +120,14 @@ def board(
     pinboard = DiscordPinboard(DiscordBot(config), paths.board_file, warn=_warn)
     try:
         with console.status("Updating the pinned status message..."):
-            pinboard.show(Board.observed(status, Online.parse(status.players)))
+            pinboard.show(
+                Board.observed(
+                    status,
+                    Online.parse(status.players),
+                    Tick.parse(status.tick),
+                    version_label(paths),
+                )
+            )
     except NotifyError as exc:
         fail(str(exc))
 

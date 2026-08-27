@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from mcadmin.core.changelog import Changelog
-from mcadmin.core.controller import Online, Status
+from mcadmin.core.controller import Online, Status, Tick
 from mcadmin.core.deaths import Death, DeathMap, hotspots
 from mcadmin.core.models import RuntimeState, ServerState
 from mcadmin.core.mrpack import ModFile, PackResult, PackSpec
@@ -69,6 +69,51 @@ def test_a_sentence_a_mod_rewrote_is_not_mistaken_for_an_empty_server():
 def test_no_reply_at_all_is_not_an_empty_server():
     assert Online.parse(None) is None
     assert Online.parse("") is None
+
+
+# ------------------------------------------------------------------ tick parsing
+
+# Exactly what a 26.2 server answers -- sentences run together, no separator
+# between "normally" and "Target", which is why each number is found on its own.
+TICK_REPLY = (
+    "The game is running normallyTarget tick rate: 20.0 per second.\n"
+    "Average time per tick: 4.7ms (Target: 50.0ms)Percentiles: P50: 4.0ms P95: 9.2ms \n"
+    "P99: 11.0ms. Sample: 100"
+)
+
+
+def test_the_tick_reply_is_read_into_numbers():
+    tick = Tick.parse(TICK_REPLY)
+    assert tick is not None
+    assert (tick.rate, tick.mspt, tick.p99) == (20.0, 4.7, 11.0)
+    assert tick.note is None, "running normally is the absence of news"
+
+
+def test_a_healthy_server_ticks_at_the_target_rate():
+    """4.7ms of work in a 50ms slot is 20 TPS, not 212."""
+    assert Tick.parse(TICK_REPLY).tps == 20.0
+
+
+def test_a_server_that_cannot_keep_up_reports_the_rate_it_manages():
+    tick = Tick(rate=20.0, mspt=100.0)
+    assert tick.tps == 10.0
+    assert tick.summary == "10.0 TPS \N{MIDDLE DOT} 100.0 ms"
+
+
+def test_a_frozen_game_says_so_rather_than_reading_as_a_very_fast_one():
+    """`/tick freeze` stops the clock, and 0.1ms per tick would otherwise look
+    like the best performance the server has ever had."""
+    tick = Tick.parse(
+        "The game is frozenTarget tick rate: 20.0 per second."
+        "Average time per tick: 0.1ms (Target: 50.0ms)"
+    )
+    assert tick.note == "frozen"
+    assert "frozen" in tick.summary
+
+
+def test_a_reply_without_the_numbers_is_not_a_reading():
+    assert Tick.parse("Unknown or incomplete command") is None
+    assert Tick.parse(None) is None
 
 
 # ------------------------------------------------------------------ status
